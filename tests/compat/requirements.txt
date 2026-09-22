@@ -15,7 +15,7 @@
 #     dorny/paths-filter gate runs `compat:` on every PR touching
 #     this file, so the dependency-conflict failure mode is now PR-
 #     visible.
-pytest==9.0.3
+pytest==9.1.1
 openai==2.37.0
 langchain-openai==1.2.1
 langchain-core==1.4.0
