@@ -623,7 +623,7 @@ jobs:
         # push, the published namespace is hardcoded to docker.io/beclab
         # below (the same person can push to beclab/llm-init as long as
         # they're an org member, regardless of their personal username).
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
