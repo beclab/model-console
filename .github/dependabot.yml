@@ -1,0 +1,139 @@
+# Dependabot configuration for Model Console.
+#
+# Goals:
+#   * Surface upstream Go module CVEs without forcing an unattended bump
+#     (govulncheck CI gate already blocks anything actively exploited;
+#     Dependabot is the upstream-pull half of that pipeline).
+#   * Keep GitHub Actions pinned versions current — every action in
+#     ci.yml (which holds both the build matrix and the release job)
+#     is pinned to a specific minor (e.g. golangci-lint-action@v6.5.0).
+#     Floating @v6 silently drifted against Go 1.26 in v1.0.3, hence
+#     the pin; Dependabot now files a PR when v6.6 / v7 lands.
+#   * Track the four upstream engine images in deploy/compose/*.yml so
+#     the smoke matrix reflects current vLLM / llama.cpp / SGLang /
+#     Ollama tags, not whatever was current six months ago.
+#   * Track the Python compat-test pin set so OpenAI / Anthropic SDK
+#     drift is visible in PR review rather than discovered at release.
+#
+# Scheduled weekly (Monday 04:00 UTC, deliberately off-business-hours
+# for both EU and US maintainers) so a single triage pass on Monday
+# morning covers a week of bumps.
+#
+# Reviewers / assignees are intentionally omitted: configure these on
+# your fork via the Dependabot settings page rather than baking
+# personal handles into a public template.
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    labels:
+      - "dependencies"
+      - "go"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    open-pull-requests-limit: 5
+    # The Go module graph is small and intentionally so (no third-party
+    # HTTP client, no logging shim). 5 is a generous ceiling that only
+    # bites during stdlib security weeks.
+    groups:
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+      observability:
+        patterns:
+          - "github.com/prometheus/*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: "pip"
+    directory: "/tests/compat"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    labels:
+      - "dependencies"
+      - "tests"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    open-pull-requests-limit: 3
+    # The langchain stack pins a hard lower bound on `openai` (1.1.x
+    # of langchain-openai requires openai>=2.26.0); a single-package
+    # bump can land green and then fail at install time the next
+    # time the suite installs. Group langchain-* + openai +
+    # anthropic so a coordinated bump is the only path the bot
+    # offers. Caught at v1.0.5 tag-cut: PR #7 bumped
+    # langchain-openai 0.2.5 -> 1.1.14 alone, which ResolutionImpossible'd
+    # against the unchanged openai 1.51.2 pin.
+    #
+    # `pytest` and `httpx` stay ungrouped: they have no cross-pin
+    # constraints with the SDK stack, and bumping them as a single
+    # PR each keeps test-runner upgrades easy to bisect.
+    groups:
+      langchain-stack:
+        patterns:
+          - "openai"
+          - "langchain"
+          - "langchain-*"
+          - "langchain_*"
+          - "anthropic"
+
+  - package-ecosystem: "docker"
+    # The Dockerfile (Go build + Python runtime base images).
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(docker)"
+      include: "scope"
+    open-pull-requests-limit: 2
+
+  # Engine images live in the compose templates (ollama / vllm / sglang /
+  # llamacpp), all now pinned to explicit tags. Dependabot's docker
+  # ecosystem scans `image:` keys in compose files on a best-effort basis;
+  # when it can resolve a newer tag it files a PR so the smoke matrix
+  # tracks current engine releases instead of drifting. If a vendor's tag
+  # scheme is unparseable (e.g. llama.cpp's `server-bNNNN`), fall back to
+  # the upstream release notes and bump the tag by hand.
+  - package-ecosystem: "docker"
+    directory: "/deploy/compose"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "engines"
+    commit-message:
+      prefix: "chore(docker)"
+      include: "scope"
+    open-pull-requests-limit: 4

@@ -1,0 +1,6 @@
+services:
+  llm-init:
+    environment:
+      MODEL_SPEC_PATH: /etc/llm-init/model-spec.json
+    volumes:
+      - ../../examples/local/specs/translate.json:/etc/llm-init/model-spec.json:ro

@@ -1,0 +1,26 @@
+{
+  "name": "gpt-oss-20b",
+  "mode": "chat",
+  "label": { "en_US": "GPT-OSS 20B (graded reasoning)" },
+  "supports": {
+    "supports_reasoning": true,
+    "supports_reasoning_effort": true,
+    "supports_native_streaming": true,
+    "supports_function_calling": true
+  },
+  "parameter_rules": [
+    {
+      "name": "reasoning_effort",
+      "type": "string",
+      "label": { "en_US": "Reasoning effort" },
+      "help": {
+        "en_US": "Three genuinely different trace lengths. There is no none: this model cannot stop reasoning, so a client that needs the option has to pick another model."
+      },
+      "default": "medium",
+      "options": ["low", "medium", "high"]
+    }
+  ],
+  "context_size": 131072,
+  "max_output_tokens": 32768,
+  "engine_args": "OLLAMA_NUM_CTX=32768"
+}

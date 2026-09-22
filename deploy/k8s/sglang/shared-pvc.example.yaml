@@ -1,0 +1,34 @@
+# Example shared HF cache PVC for the SGLang Pod template.
+# Identical shape to deploy/k8s/vllm/shared-pvc.example.yaml; see that
+# file for the per-field rationale.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-hub-cache
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: <your-rwx-storage-class>
+  resources:
+    requests:
+      storage: 50Gi
+---
+# OPTIONAL: only needed if you uncomment the model-spec volume/mount +
+# MODEL_SPEC_PATH env in pod.yaml. Otherwise MODEL_MODE (+ MODEL_SUPPORTS)
+# seeds the spec and this ConfigMap can be skipped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-spec-<MODEL_NAME>
+data:
+  model-spec.json: |
+    {
+      "name": "<MODEL_NAME>",
+      "mode": "chat",
+      "label": { "en_US": "<MODEL_NAME>" },
+      "supports": {
+        "supports_function_calling": true,
+        "supports_native_streaming": true
+      },
+      "context_size": 32768,
+      "max_output_tokens": 4096
+    }

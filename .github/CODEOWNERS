@@ -1,0 +1,34 @@
+# CODEOWNERS for Model Console.
+#
+# Format: <pattern> <owner> [<owner>...]
+# Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/managing-repository-settings/about-code-owners
+#
+# This repo is maintained by a single GitHub identity. The placeholder
+# below is intentionally a wildcard handle pointing at the project
+# owner; forks should overwrite it with their own user / team. GitHub
+# silently drops CODEOWNERS entries that reference identities that
+# don't exist on the fork, which is the desired failure mode for
+# downstream forks.
+#
+# Default owner for everything in the repo. Specific paths below
+# override this; CODEOWNERS uses last-match-wins semantics.
+*                       @llm-init-maintainers
+
+# ---- runtime correctness hot spots -------------------------------------
+# Any change to the lifecycle state machine, control plane, or data
+# plane changes the shape of the operator-visible contract (phases,
+# /api/* surface, /v1/* proxy semantics) and needs a maintainer review
+# even on otherwise-mechanical refactors.
+/internal/lifecycle/    @llm-init-maintainers
+/internal/controlplane/ @llm-init-maintainers
+/internal/dataplane/    @llm-init-maintainers
+
+# ---- security / supply chain ------------------------------------------
+# Anything under .github/workflows changes the CVE / govulncheck /
+# release-signing posture.
+/.github/workflows/     @llm-init-maintainers
+
+# ---- release artifacts ------------------------------------------------
+# CHANGELOG and version-stamped READMEs are part of the release contract;
+# reviewing them ensures the docs match the tag.
+/CHANGELOG.md           @llm-init-maintainers

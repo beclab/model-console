@@ -1,0 +1,146 @@
+# OCR stack: llm-init (proxy) + OCRAdapter (Rust) + Redis + llama.cpp (VLM).
+#
+# Topology (planning A3 / L4) — dots / surya2 three-piece (no layout):
+#   Client → llm-init:8080 → ocradapter:8080 → llamacpp:8081
+#                              └─ Redis (job queue / state)
+#
+# Paddle-hybrid (VLM + layout-service) is a separate compose file:
+#   deploy/compose/paddle-ocr.yml
+# Do not add a layout profile here; keep this file for vision-only pipelines.
+#
+# Shared volumes:
+#   - hf-hub-cache  llm-init writes; llamacpp reads (GGUF / mmproj).
+#   - run-state     sentinel + model_path for llamacpp.sh only.
+#                   ocradapter does NOT wait on sentinel; its Rust binary
+#                   probes LLAMACPP_URL (and OCR_LAYOUT_URL for paddle —
+#                   use paddle-ocr.yml for that stack) until upstream is up.
+#   - ocr-spool     OCRAdapter multipart spool.
+#
+# Quickstart:
+#   cp deploy/compose/.env.example .env
+#   # set MODEL_NAME (must be OCRAdapter pipeline id: dots|surya2|…),
+#   # MODEL_SOURCE (+ ENGINE_ARGS for llamacpp --mmproj / -ngl),
+#   # OCR_ADAPTER_IMAGE when the image is available
+#   docker compose -f deploy/compose/ocr.yml --env-file .env up
+#   # paddle: docker compose -f deploy/compose/paddle-ocr.yml --env-file .env up
+#
+# Contracts:
+#   - ENGINE_KIND=ocr → deriveEngineURL http://ocradapter:8080
+#   - llm-init must NOT set ENGINE_ARGS (ParseEngineArgs rejects non-empty
+#     for ocr); put -ngl / --mmproj on the llamacpp service only.
+#   - MODEL_NAME must match on llm-init and ocradapter (proxy Ready probes
+#     GET /v1/models on OCRAdapter). OCRAdapter rejects unknown names
+#     (use dots / surya2 / paddle-hybrid, not dots-ocr).
+#   - REDIS_URL is required by OCRAdapter (default redis://redis:6379/0).
+#   - Clients hit only llm-init; do not publish ocradapter/llamacpp/redis.
+#
+
+name: llm-init-ocr
+
+services:
+  redis:
+    image: ${OCR_REDIS_IMAGE:-redis:7-alpine}
+    # Job queue for OCRAdapter; not published to the host.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-docker.io/beclab/llm-init:v1.2.1}
+    environment:
+      ENGINE_KIND: ocr
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_MODE: ${MODEL_MODE:-ocr}
+      MODEL_SUPPORTS: ${MODEL_SUPPORTS:-}
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      MODEL_SOURCE_LOCAL: ${MODEL_SOURCE_LOCAL:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+      - run-state:/run/llm-init
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-init", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  ocradapter:
+    # OCRAdapter is an external dependency without a verified stable tag.
+    # Production deployments must override OCR_ADAPTER_IMAGE.
+    # Image CMD runs the Rust binary directly (no sentinel entrypoint script).
+    # Startup blocks inside the binary until LLAMACPP_URL is reachable
+    # (paddle: also OCR_LAYOUT_URL); see llminit OCRAdapter-upstream-probe doc.
+    image: ${OCR_ADAPTER_IMAGE:-docker.io/beclab/ocr-adapter:latest}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ocr-spool:/var/ocr-spool
+    environment:
+      MODEL_NAME: ${MODEL_NAME}
+      LISTEN_ADDR: ${OCR_ADAPTER_LISTEN_ADDR:-0.0.0.0:8080}
+      LLAMACPP_URL: ${LLAMACPP_URL:-http://llamacpp:8081}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OCR_REDIS_PREFIX: ${OCR_REDIS_PREFIX:-ocr:}
+      OCR_PIPELINE: ${OCR_PIPELINE:-dots}
+      OCR_LAYOUT_URL: ${OCR_LAYOUT_URL:-http://layout:8080}
+      OCR_SPOOL_DIR: ${OCR_SPOOL_DIR:-/var/ocr-spool}
+      OCR_MAX_INFLIGHT: ${OCR_MAX_INFLIGHT:-1}
+      OCR_PDF_STRATEGY: ${OCR_PDF_STRATEGY:-vision}
+      OCR_DEFAULT_FORMAT: ${OCR_DEFAULT_FORMAT:-text}
+    # No host ports: clients enter via llm-init only.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9128}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      ENGINE_KIND: llamacpp
+      MODEL_NAME: ${MODEL_NAME}
+      LLAMACPP_PORT: ${LLAMACPP_PORT:-8081}
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      # Vision OCR typically needs --mmproj / -ngl; set in .env.
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
+    healthcheck:
+      disable: true
+    # Uncomment for GPU hosts:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-hub-cache:
+  run-state:
+  ocr-spool:

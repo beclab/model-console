@@ -1,0 +1,52 @@
+{
+  "_comment": {
+    "ready_ms": 0,
+    "ttft_ms": 0,
+    "recorded_at": ""
+  },
+  "_schema": {
+    "ready_ms": 0,
+    "ttft_ms": 0,
+    "recorded_at": "RFC3339 UTC timestamp of the run"
+  },
+  "clipembed": {
+    "ready_ms": 36028,
+    "ttft_ms": 0,
+    "recorded_at": "2026-08-09T23:52:51Z"
+  },
+  "embed": {
+    "ready_ms": 8010,
+    "ttft_ms": 8,
+    "recorded_at": "2026-08-05T23:24:20Z"
+  },
+  "llamacpp": {
+    "ready_ms": 6009,
+    "ttft_ms": 17,
+    "recorded_at": "2026-07-03T08:34:36Z"
+  },
+  "rerank-cpu": {
+    "ready_ms": 4004,
+    "ttft_ms": 92,
+    "recorded_at": "2026-09-06T11:08:06Z"
+  },
+  "rerank-intel-gpu": {
+    "ready_ms": 168121,
+    "ttft_ms": 79,
+    "recorded_at": "2026-09-06T11:11:17Z"
+  },
+  "rerank-nvidia": {
+    "ready_ms": 4004,
+    "ttft_ms": 10,
+    "recorded_at": "2026-09-06T11:08:19Z"
+  },
+  "sglang": {
+    "ready_ms": 28024,
+    "ttft_ms": 3803,
+    "recorded_at": "2026-07-03T08:36:26Z"
+  },
+  "vllm": {
+    "ready_ms": 28020,
+    "ttft_ms": 8,
+    "recorded_at": "2026-07-10T00:00:00Z"
+  }
+}

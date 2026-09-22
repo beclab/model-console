@@ -1,0 +1,27 @@
+# GPU override for the llama.cpp examples. Layered on top of
+# deploy/compose/llamacpp.yml when USE_GPU=1 is set on the runner.
+#
+# Two things change vs. the CPU-shipped default:
+#   1. image -> :server-cuda (the upstream CUDA-linked llama-server;
+#      :server alone is the generic CPU/Vulkan build and silently
+#      ignores -ngl all even when devices are passed in).
+#   2. deploy.resources.devices grants the container nvidia GPUs.
+#      Docker Desktop on Windows / Linux NVIDIA Container Toolkit
+#      both honour this; verify host-side with
+#      `docker run --rm --gpus all nvidia/cuda:<tag> nvidia-smi`.
+#
+# v1.1 no longer hard-codes `--fit off -ngl all` in the wrapper; put
+# `-ngl all -fa on` in ENGINE_ARGS yourself for full-GPU residency.
+# The wrapper does bake in `--metrics`, so once both pieces above are in
+# place /api/diag/gpu reports llamacpp:kv_cache_usage_ratio.
+
+services:
+  llamacpp:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

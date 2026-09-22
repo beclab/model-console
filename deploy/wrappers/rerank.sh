@@ -1,0 +1,61 @@
+#!/bin/sh
+# Rerank (rerank-server) engine wrapper.
+#
+# Waits for llm-init sentinel, sets MODEL_DIR from model_path,
+# then runs rerank-server under supervise_engine so POST /api/engine/restart
+# can relaunch an engine that has wedged. Engine configuration uses
+# rerank-server native env (MODEL_ID, ACCELERATOR, RERANK_*), NOT llm-init
+# ENGINE_ARGS: config.ParseEngineArgs rejects a non-empty value for this
+# kind, so there is no engine_args handoff to wait for.
+#
+# Naming contract (rerank has no MODEL_NAME env):
+#   - rerank container: MODEL_ID (registry id, e.g. bge-reranker-v2-m3)
+#   - llm-init container: MODEL_NAME must equal MODEL_ID for Ready + proxy rewrite
+#   - Neither container sets ENGINE_ARGS
+#
+# Required env (rerank container):
+#   MODEL_ID      -- registry id
+#   ACCELERATOR   -- intel-gpu | nvidia | nvidia-gb10 | cpu (no auto)
+# Optional env:
+#   RERANK_SERVER_BIN -- override binary (default /usr/local/bin/rerank-server)
+#   RERANK_PORT       -- default 8080 (matches deriveEngineURL for rerank)
+#   RERANK_RUNTIME    -- openvino | onnx | vllm (defaults from ACCELERATOR)
+
+# shellcheck disable=SC2034
+ENGINE=rerank
+# Source the shared helpers: the sibling copy by default, or the one
+# llm-init publishes into RUN_DIR when WRAPPER_COMMON says so. That copy
+# can arrive late — the two containers are separate Deployments with no
+# ordering between them — so waiting here is the normal path.
+# Keep this block byte-identical across wrappers (tests/wrappers checks).
+WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+_wc=0
+while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+    printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+    sleep 5
+    _wc=$((_wc + 5))
+done
+[ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+unset _wc
+# shellcheck source=common.sh
+. "$WRAPPER_COMMON"
+
+wait_for_sentinel
+MODEL_PATH=$(read_model_path)
+export MODEL_DIR="$MODEL_PATH"
+
+RERANK_SERVER_BIN="${RERANK_SERVER_BIN:-/usr/local/bin/rerank-server}"
+if [ ! -x "$RERANK_SERVER_BIN" ]; then
+    RERANK_SERVER_BIN="$(command -v rerank-server 2>/dev/null || true)"
+fi
+if [ -z "$RERANK_SERVER_BIN" ] || [ ! -x "$RERANK_SERVER_BIN" ]; then
+    log "rerank-server binary not found (checked /usr/local/bin/rerank-server, \$PATH, \$RERANK_SERVER_BIN)"
+    exit 127
+fi
+
+run_rerank() {
+    log "starting rerank-server model_dir=$MODEL_PATH model_id=${MODEL_ID:-unset} port=${RERANK_PORT:-8080}"
+    exec "$RERANK_SERVER_BIN" "$@"
+}
+
+supervise_engine run_rerank "$@"

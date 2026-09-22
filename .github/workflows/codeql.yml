@@ -1,0 +1,91 @@
+name: CodeQL
+
+# CodeQL produces the static-analysis side of the security story
+# (Dependabot covers known-CVE deps; secret-scanning covers leaked
+# tokens; CodeQL covers SAST findings on our own Go code). The repo
+# has Code Security enabled (org-level GHAS + advanced security on
+# this repo, as of v1.0.5), which is what makes CodeQL findings
+# actually surface in the Security tab. Without that toggle CodeQL
+# silently uploads to /dev/null.
+#
+# Schedule rationale: weekly on Sunday 04:00 UTC = light traffic
+# window, no correlation with PR pushes, gives us "sleeping
+# vulnerability" coverage even on quiet weeks. PR runs handle the
+# "did this change introduce something" case.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 0"
+
+# Default least-privilege; the scan job opts in to security-events
+# write (CodeQL uploads SARIF) and contents read (checkout).
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required to upload the SARIF result to the Security tab.
+      security-events: write
+      # Required to read the source.
+      contents: read
+      # Required for private repos: actions read lets CodeQL discover
+      # the workflow tree it's analysing.
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Single-language matrix today (Go), but kept as a matrix so
+        # adding the wrappers/ shell scripts (sh/bash) or the compat/
+        # Python tests later is a single line change rather than a
+        # restructure.
+        language: ["go"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Match the build/test job's Go pin so the dependency graph
+      # CodeQL extracts is the same one we ship. Drift here would
+      # give CodeQL a different toolchain view than the binary,
+      # which is exactly the kind of false-confidence we want to
+      # avoid.
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          # security-and-quality is the "everything" suite. It's
+          # noisier than `security-extended` but the noise on a
+          # 12k-LoC tree is manageable and several useful style
+          # findings (e.g. unsafe path-traversal patterns) live in
+          # the quality bucket only.
+          queries: security-and-quality
+
+      # Autobuild handles a vanilla Go project well; we don't have a
+      # custom build wrapper that would need a manual `go build`
+      # invocation. If we add cgo or build-tag-gated code paths we
+      # may need to switch to manual.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

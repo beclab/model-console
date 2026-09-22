@@ -1,0 +1,46 @@
+#!/bin/sh
+# ClipEmbed (IREmbeddingServer) engine wrapper.
+#
+# Same bootstrap as embed.sh today; kept separate so CLIP-specific startup
+# can diverge without touching text-embedding deploys. Runs under
+# supervise_engine so POST /api/engine/restart can relaunch a wedged engine;
+# ENGINE_ARGS must be empty for this kind, so there is no handoff to wait for.
+
+# shellcheck disable=SC2034
+ENGINE=clipembed
+# Source the shared helpers: the sibling copy by default, or the one
+# llm-init publishes into RUN_DIR when WRAPPER_COMMON says so. That copy
+# can arrive late — the two containers are separate Deployments with no
+# ordering between them — so waiting here is the normal path.
+# Keep this block byte-identical across wrappers (tests/wrappers checks).
+WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+_wc=0
+while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+    printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+    sleep 5
+    _wc=$((_wc + 5))
+done
+[ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+unset _wc
+# shellcheck source=common.sh
+. "$WRAPPER_COMMON"
+
+wait_for_sentinel
+MODEL_PATH=$(read_model_path)
+export EMBED_MODEL_DIR="$MODEL_PATH"
+
+EMBED_SERVER_BIN="${EMBED_SERVER_BIN:-/usr/local/bin/embed_server}"
+if [ ! -x "$EMBED_SERVER_BIN" ]; then
+    EMBED_SERVER_BIN="$(command -v embed_server 2>/dev/null || true)"
+fi
+if [ -z "$EMBED_SERVER_BIN" ] || [ ! -x "$EMBED_SERVER_BIN" ]; then
+    log "embed_server binary not found (checked /usr/local/bin/embed_server, \$PATH, \$EMBED_SERVER_BIN)"
+    exit 127
+fi
+
+run_clipembed() {
+    log "starting embed_server model_dir=$MODEL_PATH model_id=${MODEL_ID:-unset} port=${EMBED_PORT:-8080}"
+    exec "$EMBED_SERVER_BIN" "$@"
+}
+
+supervise_engine run_clipembed "$@"

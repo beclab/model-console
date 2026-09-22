@@ -1,0 +1,68 @@
+# ollama-url-channel download-fault stack: llm-init (ENGINE_KIND=ollama)
+# downloads the model URL from faultsrv, then registers it into a real
+# ollama daemon. ENGINE_KIND=ollama is AliveBeforeBoot, so a live ollama
+# daemon is required for the lifecycle to reach the download step at all
+# (Run blocks on WaitAlive against http://ollama:11434 first).
+#
+# Every fault in the matrix fires during the *download* phase (404/503)
+# or the *verify* phase (sha mismatch), i.e. before the register step,
+# so the daemon only needs to be alive — it never has to ingest the
+# (random) bytes faultsrv serves. There is deliberately no "normal" case
+# here: faultsrv payloads are not valid GGUF, so a full register cannot
+# succeed; valid end-to-end ollama is covered by tests/integration/ollama.
+#
+# Driven by tests/integration/ollamaurl/main_test.go. Same env knobs as
+# faultsrv-url.yml, with MODEL_SOURCE of the form
+#   ollama://http://faultsrv:9000/model.bin[#sha256=...]
+
+name: llm-init-faultsrv-ollama-url
+
+services:
+  ollama:
+    image: ollama/ollama:0.30.0
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  faultsrv:
+    image: ${FAULTSRV_IMAGE:-llm-init-faultsrv:integration}
+    command:
+      - "-addr"
+      - "0.0.0.0:9000"
+      - "-size"
+      - "${FAULTSRV_SIZE:-1048576}"
+      - "-support-range"
+      - "-force-status"
+      - "${FAULTSRV_FORCE_STATUS:-0}"
+      - "-fail-first"
+      - "${FAULTSRV_FAIL_FIRST:-0}"
+
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-llm-init:integration}
+    depends_on:
+      faultsrv:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    environment:
+      ENGINE_KIND: ollama
+      MODEL_NAME: faultsrv-model
+      MODEL_MODE: chat
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - run-state:/run/llm-init
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      disable: true
+
+volumes:
+  run-state:

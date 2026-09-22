@@ -1,0 +1,22 @@
+# Pinned dependencies for the Python compatibility smoke suite.
+# Bumping a pin requires re-running tests/compat/ end-to-end against
+# deploy/compose/llamacpp.yml — see CI's `compat` job in
+# .github/workflows/ci.yml.
+#
+# Pinning constraints across the langchain stack:
+#   * langchain-openai 1.1.x requires `openai>=2.26.0,<3.0.0`. The
+#     pre-v1.0.6 file pinned openai==1.51.2 alongside
+#     langchain-openai==1.2.1, which yields ResolutionImpossible.
+#     Caught at v1.0.5 tag-cut; fix was to bump openai to 2.x.
+#   * Pinning openai exactly (rather than `>=2.26.0`) keeps the suite
+#     reproducible: a Dependabot PR that bumps either langchain-openai
+#     or openai now changes the lockfile visibly, so a maintainer can
+#     read the SDK release notes before merge. Track B's
+#     dorny/paths-filter gate runs `compat:` on every PR touching
+#     this file, so the dependency-conflict failure mode is now PR-
+#     visible.
+pytest==9.0.3
+openai==2.37.0
+langchain-openai==1.2.1
+langchain-core==1.4.0
+httpx==0.28.1

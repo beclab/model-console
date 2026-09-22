@@ -1,0 +1,116 @@
+# vLLM-backed deployment.
+#
+# Three services share two volumes:
+#   - hf-hub-cache  shared HF cache (mountPath /cache/hf/hub).
+#                   llm-init writes; vllm reads. Source name / type controlled
+#                   by HF_CACHE_KIND/SOURCE in .env.
+#   - run-state     ephemeral sentinel + model_path file. Produced by
+#                   llm-init, consumed by the vllm wrapper.
+#
+# Quickstart:
+#   cp deploy/compose/.env.example .env
+#   docker compose -f deploy/compose/vllm.yml --env-file .env up
+#
+# v1.1.0 contracts:
+#   - Single ENGINE_ARGS env on both containers (cmdline syntax for
+#     vLLM; deploy/wrappers/vllm.sh shell-word-splits and exec's).
+#   - The model-spec is seeded from MODEL_MODE (+ optional MODEL_SUPPORTS)
+#     and persisted at MODEL_SPEC_PATH (default ${RUN_DIR}/model-spec.json);
+#     mount a file + set MODEL_SPEC_PATH to ship a richer spec (below).
+#   - VLLM_IMAGE selects the engine container image (GPU or CPU build).
+#     VLLM_GPU_COUNT controls NVIDIA reservation: "all" (default) or 0 (CPU).
+#     VLLM_MEM_LIMIT caps vllm container RAM (e.g. 36G). vLLM >= v0.24.0 CPU
+#     images honor cgroup limits for gpu_memory_utilization (default 0.9/0.92).
+#     Leave unset or 0 for no limit (typical GPU deploys).
+#
+# Engine image examples (set in .env or export before compose up):
+#   GPU (CUDA 13 default tag):  VLLM_IMAGE=vllm/vllm-openai:v0.20.1
+#   GPU (CUDA 12.9 hosts):      VLLM_IMAGE=vllm/vllm-openai:v0.20.1-cu129
+#   CPU (x86_64, cgroup-aware): VLLM_IMAGE=vllm/vllm-openai-cpu:v0.24.0-x86_64
+#                               VLLM_GPU_COUNT=0  VLLM_MEM_LIMIT=32G
+#   CPU (arm64):                VLLM_IMAGE=vllm/vllm-openai-cpu:v0.24.0-arm64
+#                               VLLM_GPU_COUNT=0  VLLM_MEM_LIMIT=32G
+#
+
+name: llm-init-vllm
+
+services:
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-docker.io/beclab/llm-init:v1.2.1}
+    environment:
+      ENGINE_KIND: vllm
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_MODE: ${MODEL_MODE:-chat}
+      MODEL_SUPPORTS: ${MODEL_SUPPORTS:-}
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      MODEL_SOURCE_LOCAL: ${MODEL_SOURCE_LOCAL:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # To ship a full capability spec instead of the env-seeded defaults,
+      # mount a file (volumes below) and point MODEL_SPEC_PATH at it:
+      # MODEL_SPEC_PATH: /etc/llm-init/model-spec.json
+    volumes:
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+      - run-state:/run/llm-init
+      # Optional full spec (pair with MODEL_SPEC_PATH above):
+      # - ./model-spec.json:/etc/llm-init/model-spec.json:ro
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-init", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  vllm:
+    # Bump via https://github.com/vllm-project/vllm/releases.
+    # Override VLLM_IMAGE for CUDA 12 (…-cu129) or CPU (vllm/vllm-openai-cpu:…).
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.20.1}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      ENGINE_KIND: vllm
+      MODEL_NAME: ${MODEL_NAME}
+      VLLM_PORT: ${VLLM_PORT:-8000}
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/vllm.sh"]
+    healthcheck:
+      disable: true
+    # GPU reservation: VLLM_GPU_COUNT=all (default) or 0 for CPU-only hosts /
+    # vllm/vllm-openai-cpu images. count=0 skips NVIDIA device allocation
+    # so compose up succeeds without nvidia-container-toolkit.
+    # VLLM_MEM_LIMIT: set for CPU (e.g. 32G). vLLM v0.24+ clamps available memory
+    # to min(host free, cgroup headroom). With default gpu_memory_utilization
+    # 0.92, pick limit so 0.92×limit ≤ host available (32G works when ~30GiB free).
+    # Default 0 = no memory cap (GPU stacks).
+    deploy:
+      resources:
+        limits:
+          memory: ${VLLM_MEM_LIMIT:-0}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${VLLM_GPU_COUNT:-all}
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-hub-cache:
+  run-state:

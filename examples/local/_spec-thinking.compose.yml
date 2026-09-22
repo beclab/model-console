@@ -1,0 +1,11 @@
+# Compose override for thinking-capable chat models. Ships a full spec via
+# mount + MODEL_SPEC_PATH (disk wins over the MODEL_MODE seed). Used by C2.
+services:
+  llm-init:
+    environment:
+      MODEL_SPEC_PATH: /etc/llm-init/model-spec.json
+    volumes:
+      # Path is relative to deploy/compose/ (compose resolves relative
+      # bind paths against the first -f file's dir, which run.sh/run.ps1
+      # set to the base deploy/compose/<engine>.yml), not to this file.
+      - ../../examples/local/specs/thinking.json:/etc/llm-init/model-spec.json:ro

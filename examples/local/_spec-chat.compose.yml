@@ -1,0 +1,13 @@
+# Compose override that ships a full chat-mode model spec instead of the
+# MODEL_MODE env seed: it mounts the spec file and points MODEL_SPEC_PATH
+# at it so disk wins over the seed. Used by all scenarios whose model is
+# mode=chat (A1-A4, B1-B3, D1, D3, E1).
+services:
+  llm-init:
+    environment:
+      MODEL_SPEC_PATH: /etc/llm-init/model-spec.json
+    volumes:
+      # Path is relative to deploy/compose/ (compose resolves relative
+      # bind paths against the first -f file's dir, which run.sh/run.ps1
+      # set to the base deploy/compose/<engine>.yml), not to this file.
+      - ../../examples/local/specs/chat.json:/etc/llm-init/model-spec.json:ro

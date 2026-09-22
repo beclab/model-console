@@ -1,0 +1,73 @@
+# llama.cpp-backed MTran-compatible translation deployment.
+#
+# This unreleased strict-mode template defaults to a local source build.
+# Run `make docker` from this checkout first, or set TRANSLATE_LLM_INIT_IMAGE
+# to a future published, fixed tag that includes strict mode. v1.2.1 does not
+# support it.
+#
+# Clients use the Model Console root routes /languages, /translate,
+# /translate/batch, and /detect. TRANSLATE_LANGUAGES and TRANSLATE_PAIRS
+# declare the catalog exposed by /languages; they do not change llama.cpp
+# startup flags.
+
+name: llm-init-translate
+
+services:
+  llm-init:
+    image: ${TRANSLATE_LLM_INIT_IMAGE:-llm-init:local}
+    environment:
+      ENGINE_KIND: llamacpp
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_MODE: ${MODEL_MODE:-translate}
+      MODEL_SUPPORTS: ${MODEL_SUPPORTS:-}
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      MODEL_SOURCE_LOCAL: ${MODEL_SOURCE_LOCAL:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+      TRANSLATE_LANGUAGES: ${TRANSLATE_LANGUAGES:-}
+      TRANSLATE_PAIRS: ${TRANSLATE_PAIRS:-}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+      - run-state:/run/llm-init
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-init", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  llamacpp:
+    image: ghcr.io/ggml-org/llama.cpp:server-b9128
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      ENGINE_KIND: llamacpp
+      MODEL_NAME: ${MODEL_NAME}
+      LLAMACPP_PORT: ${LLAMACPP_PORT:-8081}
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+volumes:
+  hf-hub-cache:
+  run-state:

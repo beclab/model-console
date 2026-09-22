@@ -1,0 +1,21 @@
+# Front-of-pod ClusterIP service. Only the llm-init port (8080) is
+# exposed; the upstream vLLM port stays pod-internal so clients always
+# go through the OpenAI-compatible surface llm-init publishes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: <MODEL_NAME>
+  labels:
+    app.kubernetes.io/name: llm-init
+    app.kubernetes.io/component: <MODEL_NAME>
+    llm-init.io/engine: vllm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: llm-init
+    app.kubernetes.io/component: <MODEL_NAME>
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

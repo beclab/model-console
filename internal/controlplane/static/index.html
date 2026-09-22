@@ -1,0 +1,351 @@
+<!doctype html>
+<!--
+  Model Console — llm-init operator UI.
+
+  Zero-build single page: this HTML + dashboard.css + the four JS modules
+  (dashboard / config / gpu / charts) are baked into the Go binary via
+  //go:embed (internal/controlplane/ui.go) and served from / and /static/*.
+  The layout follows the "Model Console" Figma (web + mobile share one
+  responsive codebase); see dashboard.css for the design tokens.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Model Console — llm-init</title>
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!--
+    Mobile app header (logo + "Model Console" + version). On desktop the
+    Olares window chrome supplies the app title, so this bar is hidden via
+    CSS and only appears at mobile widths — matching the mobile Figma,
+    where the version also lives up here rather than in the meta row.
+  -->
+  <header class="appbar">
+    <span class="appbar__logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none">
+        <rect width="24" height="24" rx="6" fill="#1ECEC0"></rect>
+        <path d="M12 5.4a4.3 4.3 0 0 0-2.7 7.65c.5.41.82 1 .82 1.66v.29h3.76v-.29c0-.66.32-1.25.82-1.66A4.3 4.3 0 0 0 12 5.4Z" fill="#E6F84D"></path>
+        <rect x="10.1" y="16" width="3.8" height="1.5" rx=".75" fill="#E6F84D"></rect>
+      </svg>
+    </span>
+    <span class="appbar__title">Model Console</span>
+    <span class="build js-build" id="buildInfoBar"></span>
+  </header>
+
+  <!--
+    Model meta row. The window chrome (title + minimize/maximize/close)
+    seen in the Figma is supplied by the Olares desktop iframe wrapper,
+    so the app renders straight from this bar down.
+  -->
+  <div class="metabar">
+    <span class="metabar__icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5Z"></path>
+        <path d="M12 2.5V12m0 0 8-4.5M12 12l-8-4.5M12 12v9.5"></path>
+      </svg>
+    </span>
+    <span class="metabar__name" id="modelMeta" data-i18n="loading">loading…</span>
+    <span class="pill pill--mode" id="modeBadge" hidden>Chat</span>
+    <span class="pill pill--engine"><span class="pill--engine__label" data-i18n="engine.label">ENGINE</span> <b id="engineBadge">—</b></span>
+    <span class="build js-build" id="buildInfo"></span>
+  </div>
+
+  <!-- ───────────────────────────────────────────────────────── tabs -->
+  <nav class="tabs" role="tablist">
+    <button data-tab="status" class="active" role="tab" data-i18n="tab.status">Status</button>
+    <button data-tab="config" role="tab" data-i18n="tab.config">Config</button>
+  </nav>
+
+  <main>
+
+    <!-- ════════════════════════════════════════════════════ Status -->
+    <section id="tab-status" class="tab-panel active" role="tabpanel">
+
+      <!--
+        Model card — identity + live download/warm-up progress, collapsible
+        (chevron) to match the Figma. dashboard.js drives #bar / #progressLabel
+        / #progressPct / #progressMeta / #fileList from /api/progress (1 s poll)
+        and #phase from the folded lifecycle phase.
+      -->
+      <div class="card model-card" id="modelCard">
+        <div class="model-head">
+          <span class="icon-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5Z"></path>
+              <path d="M12 2.5V12m0 0 8-4.5M12 12l-8-4.5M12 12v9.5"></path>
+            </svg>
+          </span>
+          <div class="model-head__text">
+            <div class="model-head__line">
+              <span class="model-head__name" id="statusModelName">—</span>
+              <span class="badge init" id="phase">init</span>
+            </div>
+            <div class="model-head__sub" id="modelSource">—</div>
+          </div>
+          <button class="card-collapse" id="modelCollapse" type="button" aria-expanded="true" data-i18n-aria-label="aria.collapse_model" aria-label="Collapse model details">
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="model-card__body" id="modelCardBody">
+          <div class="card__divider"></div>
+
+          <div class="progress-block">
+            <div class="progress-block__head">
+              <span class="progress-block__label" id="progressLabel">Initializing…</span>
+              <span class="progress-block__pct" id="progressPct"></span>
+            </div>
+            <div class="progress"><div id="bar" class="progress__bar indeterminate" style="width:0%"></div></div>
+            <div class="progress-meta" id="progressMeta" hidden></div>
+            <ul class="file-list" id="fileList" hidden></ul>
+          </div>
+
+          <div class="card__divider"></div>
+
+          <div class="actions actions--end" id="modelActions">
+            <button id="retryBtn" class="btn btn--ghost" type="button" hidden>Re-download</button>
+          </div>
+        </div>
+      </div>
+
+      <!--
+        Diagnostics — only surfaced (un-hidden, data-state="error") when the
+        lifecycle is unhealthy (phase=degraded/failed or a non-empty
+        last_error). The design folds transport retries into the progress
+        meta line; this card stays the escape hatch for the failure path.
+      -->
+      <div class="card error-card" id="errorCard" data-state="error" hidden>
+        <div class="card__head"><h2 data-i18n="diag.title">Diagnostics</h2></div>
+        <div class="card__divider"></div>
+        <div class="row"><span data-i18n="diag.last_error">Last error</span><span id="lastError">—</span></div>
+        <div class="row"><span data-i18n="diag.retry_count">Retry count</span><span id="retryCount">0</span></div>
+        <div class="row"><span data-i18n="diag.transport_retries">Transport retries</span><span id="transportRetries">0</span></div>
+        <p class="help" data-i18n-html="diag.help">Retry kicks a fresh ensure pass with <code>?force=true</code> — use it after fixing a bad MODEL_SOURCE, token, or transient network failure.</p>
+      </div>
+
+      <!--
+        Service status — engine + model liveness LEDs, the model name, and
+        (once an engine is wired) the connection panel: audience + API-format
+        selectors, the live base URL, and the supported-endpoint catalog
+        (/api/endpoints). Hidden in download-only mode (empty ENGINE_KIND).
+      -->
+      <div class="card svc-card" id="engineCard" hidden>
+        <div class="card__head">
+          <h2 data-i18n="svc.title">Service status</h2>
+        </div>
+        <div class="card__divider"></div>
+
+        <!-- Model liveness + name -->
+        <div class="svc-row">
+          <span class="led unknown" id="ledModel"></span>
+          <span class="svc-row__name" data-i18n="svc.model">Model</span>
+          <span class="pill pill--state" id="modelExists">unknown</span>
+        </div>
+        <div class="svc-detail" id="modelDetail" hidden>
+          <div class="inset">
+            <span class="inset__label" data-i18n="svc.model_name">Model name</span>
+            <span class="inset__value" id="apiModel">—</span>
+            <button class="copy-icon" data-target="apiModel" data-i18n-title="svc.copy_model_title" title="Copy model name" type="button">
+              <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+              <span class="copy-icon-label" data-i18n="copy">Copy</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Engine liveness + connection panel -->
+        <div class="svc-row">
+          <span class="led unknown" id="ledEngine"></span>
+          <span class="svc-row__name" data-i18n="svc.engine">Engine</span>
+          <span class="pill pill--state" id="engineAlive">unknown</span>
+        </div>
+        <div class="svc-detail" id="engineDetail" hidden>
+
+          <div class="radio-row">
+            <span class="radio-row__label" data-i18n="svc.who">WHO IS CALLING</span>
+            <div class="radio-group" id="audienceGroup" role="radiogroup">
+              <label class="radio"><input type="radio" name="audience" value="olares" checked><span data-i18n="svc.aud_olares">Apps in Olares</span></label>
+              <label class="radio"><input type="radio" name="audience" value="lan"><span data-i18n="svc.aud_lan">Devices in LAN</span></label>
+              <label class="radio"><input type="radio" name="audience" value="remote"><span data-i18n="svc.aud_remote">Remote</span></label>
+            </div>
+          </div>
+
+          <div class="radio-row">
+            <span class="radio-row__label" data-i18n="svc.format">WHAT API FORMAT</span>
+            <div class="radio-group" id="formatGroup" role="radiogroup"></div>
+          </div>
+
+          <!--
+            Base URL row(s). renderConnection() rebuilds this list per
+            audience: Apps in Olares / Remote → one public-URL row; Devices
+            in LAN → two .local rows (Windows dash-host + Mac dot-host).
+          -->
+          <div class="url-list" id="baseUrlList"></div>
+
+          <div class="callout callout--warn" id="remoteWarning" data-i18n="svc.remote_warning" hidden>
+            Remote access may require LarePass VPN to be turned on before you can connect. Please confirm you have LarePass installed and logged in.
+          </div>
+
+          <details class="advanced endpoints" id="endpointsBox">
+            <summary class="advanced__summary">
+              <span><span data-i18n="svc.endpoints">Supported Endpoints</span> (<span id="endpointCount">0</span>)</span>
+              <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+            </summary>
+            <div class="advanced__body">
+              <ul class="endpoint-list" id="endpointList"></ul>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <!--
+        Download-only mode — shown in place of Service status when ENGINE_KIND
+        is empty (refreshConfig toggles #downloadOnlyCard vs #engineCard).
+        Matches the Figma "Download-Only mode" empty state.
+      -->
+      <div class="card empty-card" id="downloadOnlyCard" hidden>
+        <span class="empty-card__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="3" y="4" width="18" height="13" rx="1.5"></rect>
+            <path d="M8 20h8M12 17v3"></path>
+            <path d="M12 7v4.5m0 0 2-2m-2 2-2-2"></path>
+          </svg>
+        </span>
+        <h2 class="empty-card__title" data-i18n="dlonly.title">Download-Only mode</h2>
+        <p class="empty-card__desc" data-i18n="dlonly.desc">ENGINE_KIND is not configured, only downloads the model file and does not start the inference engine.</p>
+      </div>
+    </section>
+
+    <!-- ════════════════════════════════════════════════════ Config -->
+    <section id="tab-config" class="tab-panel" role="tabpanel">
+
+      <!--
+        Model capability card — identity + capability pills, collapsible
+        (chevron) to reveal the full Model Spec JSON editor. config.js drives
+        #cfgModelName / #cfgModelMeta / #capsList and the #specEditor.
+      -->
+      <div class="card model-card" id="cfgModelCard">
+        <div class="model-head">
+          <span class="icon-box" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5Z"></path>
+              <path d="M12 2.5V12m0 0 8-4.5M12 12l-8-4.5M12 12v9.5"></path>
+            </svg>
+          </span>
+          <div class="model-head__text">
+            <div class="model-head__line">
+              <span class="model-head__name" id="cfgModelName">—</span>
+              <span class="model-head__meta" id="cfgModelMeta"></span>
+            </div>
+            <div class="caps" id="capsList"></div>
+          </div>
+          <button class="card-collapse" id="cfgModelCollapse" type="button" aria-expanded="false" data-i18n-aria-label="aria.toggle_spec" aria-label="Toggle model spec editor">
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="model-card__body" id="cfgModelBody" hidden>
+          <div class="card__divider"></div>
+          <div class="spec-section__label" data-i18n="cfg.model_spec">Model Spec</div>
+          <textarea id="specEditor" class="spec-editor" spellcheck="false" rows="16" readonly data-i18n-aria-label="aria.spec_json" aria-label="model spec JSON"></textarea>
+          <p class="help" data-i18n-html="cfg.model_spec_help">Read-only view of the live <code>model-spec.json</code> (<code>GET /api/model-spec</code>).</p>
+        </div>
+      </div>
+
+      <!-- Parameters: Form / Raw -->
+      <div class="card" id="paramCard">
+        <div class="card__head">
+          <h2 data-i18n="cfg.params">参数</h2>
+          <div class="seg" role="tablist" data-i18n-aria-label="aria.param_view" aria-label="parameter view">
+            <button class="seg__btn active" data-view="form" type="button" data-i18n="cfg.form">Form</button>
+            <button class="seg__btn" data-view="raw" type="button" data-i18n="cfg.raw">Raw</button>
+          </div>
+        </div>
+        <div class="card__divider"></div>
+
+        <!-- Form view: Context Length + Advanced (parsed engine args) -->
+        <div id="formView" class="param-view active">
+          <div class="field" id="ctxField" hidden>
+            <label class="field__label" for="ctxLen">
+              <span data-i18n="cfg.context_length">Context Length</span>
+              <span class="info-dot" data-i18n-title="tip.context_length" role="img">?</span>
+            </label>
+            <input id="ctxLen" class="input input--num" type="number" min="0" step="1024" value="" readonly>
+          </div>
+
+          <details class="advanced" id="argsCard">
+            <summary class="advanced__summary">
+              <span data-i18n="cfg.advanced">Advanced parameters</span>
+              <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+            </summary>
+            <div class="advanced__body">
+              <div id="argsForm" class="param-form"></div>
+              <div id="argsUnknown" class="muted"></div>
+              <p class="help" data-i18n-html="cfg.args_help">Parsed view of model-card <code>engine_args</code>. Edit the raw string in the Raw tab; save updates the card and restarts the engine.</p>
+            </div>
+          </details>
+        </div>
+
+        <!-- Raw view: editable model-card engine_args -->
+        <div id="rawView" class="param-view">
+          <div class="spec-section__label" id="engineArgsTitle">Engine launch args</div>
+          <textarea id="argsRaw" class="spec-editor" spellcheck="false" rows="8" data-i18n-aria-label="aria.engine_args" aria-label="engine args"></textarea>
+          <div class="row" style="margin-top:0.75rem;gap:0.5rem;display:flex;align-items:center;">
+            <button type="button" class="btn btn--primary" id="argsSaveBtn" data-i18n="cfg.save_engine_args">Save and restart engine</button>
+            <span id="argsStatus" class="spec-status muted"></span>
+          </div>
+          <p class="help" data-i18n-html="cfg.raw_help">Model-card <code>engine_args</code> (SSOT). Save writes <code>PUT /api/model-spec</code> and signals the engine wrapper to relaunch. Bypassing Model Console may leave the card out of sync with the process.</p>
+        </div>
+      </div>
+
+      <!-- GPU residency block. Hidden in download-only. -->
+      <div id="gpuBlock" hidden>
+
+        <div class="card" id="gpuWaitingBanner" hidden>
+          <div class="card__head"><h2 data-i18n="gpu.engine_not_ready">Engine not ready</h2></div>
+          <div class="card__divider"></div>
+          <p data-i18n-html="gpu.waiting_help">Waiting for the model to finish downloading and the engine to come online (<code>phase=ready</code>). GPU residency populates once the lifecycle reaches ready. Current phase: <code id="gpuWaitingPhase">unknown</code>.</p>
+          <p class="help" data-i18n="gpu.see_status">See the Status tab for download progress.</p>
+        </div>
+
+        <div id="gpuBody">
+
+          <!-- GPU Residency -->
+          <div class="card">
+            <div class="card__head"><h2 data-i18n="gpu.title">GPU Residency</h2></div>
+            <div class="card__divider"></div>
+            <div class="kv-grid">
+              <div class="kv-grid__cell"><span class="kv-grid__k" data-i18n="gpu.mode">Mode</span><span class="kv-grid__v" id="gpuMode">—</span></div>
+              <div class="kv-grid__cell"><span class="kv-grid__k" data-i18n="gpu.vram">VRAM</span><span class="kv-grid__v" id="gpuVram">—</span></div>
+              <div class="kv-grid__cell"><span class="kv-grid__k" data-i18n="gpu.kv">KV cache used</span><span class="kv-grid__v" id="gpuKvCache">—</span></div>
+              <div class="kv-grid__cell"><span class="kv-grid__k" data-i18n="gpu.memutil">GPU mem util</span><span class="kv-grid__v" id="gpuMemUtil">—</span></div>
+              <div class="kv-grid__cell"><span class="kv-grid__k" data-i18n="gpu.reported_by">Reported by</span><span class="kv-grid__v" id="gpuSource">—</span></div>
+              <div class="kv-grid__cell"><span class="kv-grid__k" data-i18n="gpu.sampled">Sampled at</span><span class="kv-grid__v" id="gpuSampled">—</span></div>
+            </div>
+            <ul class="warnings" id="gpuWarnings"></ul>
+            <div class="card__divider"></div>
+            <div class="actions actions--end">
+              <button id="gpuDetectBtn" class="btn btn--primary" data-i18n="gpu.detect">Detect</button>
+            </div>
+            <p class="help" data-i18n-html="gpu.help">Source: <code>GET /api/diag/gpu</code>. Mode <code>partial</code>/<code>cpu_only</code> on a GPU host usually means an env mis-mount.</p>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- llm-init operator UI -->
+<script src="/static/i18n.js"></script>
+<script src="/static/charts.js"></script>
+<script src="/static/gpu.js"></script>
+<script src="/static/config.js"></script>
+<script src="/static/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+# URL-channel download-fault stack: llm-init (ENGINE_KIND=llamacpp) in
+# front of a faultsrv that serves the model URL. No real engine is
+# started — the download-fault matrix asserts on GET /api/progress, and
+# the lifecycle flips degraded/failed (or ready, after writing the
+# sentinel) independent of WaitAlive against the absent llama-server.
+#
+# Driven by tests/integration/download/main_test.go. Knobs (all via env):
+#   LLM_INIT_IMAGE        image under test (built by the test if unset)
+#   FAULTSRV_IMAGE        faultsrv image (built by the test if unset)
+#   FAULTSRV_SIZE         payload size in bytes (default 1 MiB)
+#   FAULTSRV_FORCE_STATUS GET status override; 0 = serve normally
+#   FAULTSRV_FAIL_FIRST   return 503 for the first N GETs; 0 = none
+#   MODEL_SOURCE          http://faultsrv:9000/model.bin[#sha256=...]
+#   LLM_INIT_PORT         host port published for llm-init (default 8080)
+
+name: llm-init-faultsrv-url
+
+services:
+  faultsrv:
+    image: ${FAULTSRV_IMAGE:-llm-init-faultsrv:integration}
+    command:
+      - "-addr"
+      - "0.0.0.0:9000"
+      - "-size"
+      - "${FAULTSRV_SIZE:-1048576}"
+      - "-support-range"
+      - "-force-status"
+      - "${FAULTSRV_FORCE_STATUS:-0}"
+      - "-fail-first"
+      - "${FAULTSRV_FAIL_FIRST:-0}"
+
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-llm-init:integration}
+    depends_on:
+      - faultsrv
+    environment:
+      ENGINE_KIND: llamacpp
+      MODEL_NAME: faultsrv-model
+      MODEL_MODE: chat
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      MODEL_SOURCE_LOCAL: /run/llm-init/model.bin
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - run-state:/run/llm-init
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    # The baked HEALTHCHECK self-probes /healthz which never flips to
+    # ready here (no engine); disable it so compose does not mark the
+    # container unhealthy. Readiness is asserted via /api/progress.
+    healthcheck:
+      disable: true
+
+volumes:
+  run-state:

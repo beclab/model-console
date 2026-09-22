@@ -1,0 +1,35 @@
+# Machine-readable runtime / tool versions for local development.
+#
+# Read by:
+#   * asdf  -- https://asdf-vm.com/
+#   * mise  -- https://mise.jdx.dev/    (drop-in successor to asdf-vm)
+#   * rtx   -- archived; mise replaces it
+#
+# Single source of truth for "what versions does this repo expect on a
+# dev machine". CI uses its own pins (.github/workflows/ci.yml), but
+# they MUST match this file; if they drift, lint findings on a dev
+# machine differ from CI findings, which is exactly the bug this file
+# closes (Track H.1, v1.0.7).
+#
+# Update protocol:
+#   1. Bump the version here.
+#   2. Bump the corresponding pin in .github/workflows/ci.yml (and
+#      .golangci.yml `run.go:` directive if Go itself moved).
+#   3. Run `tools/install-lint.sh` (or `asdf install` / `mise install`)
+#      and confirm `golangci-lint version` matches.
+#   4. Run `golangci-lint run --timeout=5m ./...` and fix any new
+#      findings the new version surfaces before merging.
+
+# Go 1.26.x: the toolchain CI uses for build / test / lint. The
+# go.mod `go 1.23.0` directive is the consumer floor (separate
+# concept) — bumping the toolchain does not bump consumers' minimum
+# required Go version.
+golang 1.26.6
+
+# golangci-lint 2.12.2: matches the v2-binary pin in
+# .github/workflows/ci.yml::lint::golangci/golangci-lint-action@v8.0.0.
+# Older v1 binaries (≤ 1.64.x) cannot read the v2 schema in
+# .golangci.yml at all; they error out on `linters.default: none`.
+# Newer v2 binaries are fine but might surface findings the CI pin
+# does not — keep the version exact.
+golangci-lint 2.12.2

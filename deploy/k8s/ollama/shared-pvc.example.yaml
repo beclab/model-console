@@ -1,0 +1,35 @@
+# Example PVC for the Ollama daemon's data dir.
+#
+# IMPORTANT. Ollama's daemon-level locking around /root/.ollama is not
+# officially supported across multiple daemons sharing the same volume,
+# so RWX cross-Pod sharing of `ollama-data` is NOT recommended. Use
+# one PVC per Pod (RWO) for the daemon's storage. For inter-Pod model
+# sharing on Ollama backends, use the daemon's `/api/push` to a shared
+# private registry instead -- the official supported path.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-data
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: <your-rwo-storage-class>
+  resources:
+    requests:
+      storage: 20Gi
+---
+# OPTIONAL: only needed if you uncomment the model-spec volume/mount +
+# MODEL_SPEC_PATH env in pod.yaml. Otherwise MODEL_MODE (+ MODEL_SUPPORTS)
+# seeds the spec and this ConfigMap can be skipped.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-spec-<MODEL_NAME>
+data:
+  model-spec.json: |
+    {
+      "name": "<MODEL_NAME>",
+      "mode": "chat",
+      "label": { "en_US": "<MODEL_NAME>" },
+      "supports": { "supports_native_streaming": true },
+      "context_size": 8192
+    }

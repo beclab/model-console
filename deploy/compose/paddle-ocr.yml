@@ -1,0 +1,161 @@
+# Paddle-hybrid OCR stack (four services):
+#   llm-init (proxy) + OCRAdapter + Redis + llama.cpp (VLM) + layout (ONNX)
+#
+# Topology:
+#   Client → llm-init:8080 → ocradapter:8080 → llamacpp:8081
+#                              └─ Redis
+#                              └─ layout:8090  (PP-DocLayoutV3 via ocrlayout.sh)
+#
+# This file is separate from deploy/compose/ocr.yml (dots/surya2 three-piece
+# stack without layout). Do not merge profiles into ocr.yml.
+#
+# Shared volumes:
+#   - hf-hub-cache  llm-init writes; llamacpp + layout read.
+#   - run-state     model_path / model_download_finish / extra_model_path
+#                   llamacpp.sh reads model_path; ocrlayout.sh reads
+#                   extra_model_path line 1 → MODEL_PATH / LAYOUT_MODEL_DIR.
+#                   ocradapter does NOT wait on sentinel; it probes
+#                   LLAMACPP_URL and OCR_LAYOUT_URL until up.
+#   - ocr-spool     OCRAdapter multipart spool.
+#
+# MODEL_SOURCE must include, as comma-separated segments:
+#   1) main VLM GGUF (first segment, ROLE=main)
+#   2) layout ONNX dir as ROLE=extra (any later segment) so L6 writes
+#      /run/llm-init/extra_model_path.
+# Optional: a projector segment marked `--role mmproj`, which is downloaded
+# inline and deliberately kept out of extra_model_path.
+#
+# Quickstart:
+#   cp deploy/compose/.env.example .env
+#   # MODEL_NAME=paddle-hybrid
+#   # MODEL_SOURCE='hf://…/VLM --include ….gguf,hf://…/PP-DocLayoutV3 --subdir …'
+#   # LAYOUT_IMAGE=ocr-layout:onnx-cpu-amd64   # or your build
+#   # OCR_ADAPTER_IMAGE=…
+#   docker compose -f deploy/compose/paddle-ocr.yml --env-file .env up
+#
+
+name: llm-init-ocr-paddle
+
+services:
+  redis:
+    image: ${OCR_REDIS_IMAGE:-redis:7-alpine}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-docker.io/beclab/llm-init:v1.2.1}
+    environment:
+      ENGINE_KIND: ocr
+      MODEL_NAME: ${MODEL_NAME:-paddle-hybrid}
+      MODEL_MODE: ${MODEL_MODE:-ocr}
+      MODEL_SUPPORTS: ${MODEL_SUPPORTS:-}
+      MODEL_SOURCE: ${MODEL_SOURCE:-}
+      MODEL_SOURCE_LOCAL: ${MODEL_SOURCE_LOCAL:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+      - run-state:/run/llm-init
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-init", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  ocradapter:
+    image: ${OCR_ADAPTER_IMAGE:-docker.io/beclab/ocr-adapter:latest}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ocr-spool:/var/ocr-spool
+    environment:
+      MODEL_NAME: ${MODEL_NAME:-paddle-hybrid}
+      LISTEN_ADDR: ${OCR_ADAPTER_LISTEN_ADDR:-0.0.0.0:8080}
+      LLAMACPP_URL: ${LLAMACPP_URL:-http://llamacpp:8081}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      OCR_REDIS_PREFIX: ${OCR_REDIS_PREFIX:-ocr:}
+      OCR_PIPELINE: ${OCR_PIPELINE:-paddle-hybrid}
+      OCR_LAYOUT_URL: ${OCR_LAYOUT_URL:-http://layout:8090}
+      OCR_SPOOL_DIR: ${OCR_SPOOL_DIR:-/var/ocr-spool}
+      OCR_MAX_INFLIGHT: ${OCR_MAX_INFLIGHT:-1}
+      OCR_PDF_STRATEGY: ${OCR_PDF_STRATEGY:-hybrid}
+      OCR_DEFAULT_FORMAT: ${OCR_DEFAULT_FORMAT:-text}
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-b9128}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      ENGINE_KIND: llamacpp
+      MODEL_NAME: ${MODEL_NAME:-paddle-hybrid}
+      LLAMACPP_PORT: ${LLAMACPP_PORT:-8081}
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
+    healthcheck:
+      disable: true
+    # Uncomment for GPU hosts:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+
+  layout:
+    # layout-service image (OCRLayout). Override LAYOUT_IMAGE after build:
+    #   docker build -f Dockerfile.amd64.onnx-cpu -t ocr-layout:onnx-cpu-amd64 .
+    image: ${LAYOUT_IMAGE:-ocr-layout:onnx-cpu-amd64}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      LAYOUT_LISTEN: ${LAYOUT_LISTEN:-0.0.0.0:8090}
+      LAYOUT_BIN: ${LAYOUT_BIN:-/usr/local/bin/ocr-layout}
+      EXTRA_MODEL_PATH_FILE: ${EXTRA_MODEL_PATH_FILE:-/run/llm-init/extra_model_path}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/ocrlayout.sh"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+volumes:
+  hf-hub-cache:
+  run-state:
+  ocr-spool:

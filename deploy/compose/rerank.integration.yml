@@ -1,0 +1,29 @@
+# Integration-test overlay for rerank stacks.
+# Not standalone — merge after rerank.yml (and optionally rerank.gpu.yml).
+#
+# Problem: on many hosts the default Docker bridge cannot reach
+# huggingface.co (errno 101), while the host itself can. This overlay
+# puts both services on the host network so llm-init hfwrap can download
+# from HF_ENDPOINT=https://huggingface.co without a mirror.
+#
+# llm-init normally derives http://rerank:8080; on host networking the
+# compose DNS name is gone, so we point at localhost via the hidden
+# LLM_INIT_TEST_ENGINE_URL override (see internal/config/config_load_engine.go).
+#
+# Usage:
+#   RERANK_ENGINE_PORT=18082 LLM_INIT_PORT=8080 \
+#     docker compose -f deploy/compose/rerank.yml \
+#       -f deploy/compose/rerank.integration.yml up
+
+services:
+  llm-init:
+    network_mode: host
+    environment:
+      PORT: ${LLM_INIT_PORT:?set LLM_INIT_PORT}
+      LLM_INIT_TEST_ENGINE_URL: http://127.0.0.1:${RERANK_ENGINE_PORT:-18082}
+
+  rerank:
+    network_mode: host
+    environment:
+      RERANK_PORT: ${RERANK_ENGINE_PORT:-18082}
+    ports: !reset []

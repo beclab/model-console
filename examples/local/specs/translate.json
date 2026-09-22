@@ -1,0 +1,17 @@
+{
+  "name": "hy-mt2-1.8b",
+  "mode": "translate",
+  "label": { "en_US": "Hy-MT2 1.8B Translate" },
+  "context_size": 2048,
+  "max_output_tokens": 512,
+  "engine_args": "-c 2048 -ngl all",
+  "extensions": {
+    "translate": {
+      "languages": ["en", "zh-Hans"],
+      "pairs": [
+        { "from": "en", "to": "zh-Hans" },
+        { "from": "zh-Hans", "to": "en" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "qwen2.5-0.5b",
+  "mode": "chat",
+  "label": { "en_US": "Qwen2.5 0.5B Instruct" },
+  "supports": {
+    "supports_function_calling": true,
+    "supports_native_streaming": true,
+    "supports_tool_choice": true,
+    "supports_vision": false
+  },
+  "context_size": 32768,
+  "max_output_tokens": 4096
+}

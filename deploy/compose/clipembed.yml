@@ -1,0 +1,69 @@
+# PureEmbeddingServer-backed CLIP deployment (OpenAI /v1/embeddings proxy).
+#
+# Same stack shape as embed.yml; ENGINE_KIND=clipembed selects the clipembed
+# adapter and compose service name so CLIP-specific deploy can diverge later.
+#
+# Quickstart:
+#   cp deploy/compose/.env.example .env
+#   docker compose -f deploy/compose/clipembed.yml --env-file .env up
+
+name: llm-init-clipembed
+
+services:
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-docker.io/beclab/llm-init:v1.2.1}
+    environment:
+      ENGINE_KIND: clipembed
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_MODE: ${MODEL_MODE:-embedding}
+      MODEL_SUPPORTS: ${MODEL_SUPPORTS:-}
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      MODEL_SOURCE_LOCAL: ${MODEL_SOURCE_LOCAL:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+      - run-state:/run/llm-init
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-init", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  clipembed:
+    image: ${EMBED_IMAGE:-embed-server:ov-intel-amd64}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      MODEL_ID: ${MODEL_ID}
+      EMBED_DEVICE: ${EMBED_DEVICE:-auto}
+      EMBED_ALLOW_CPU_FALLBACK: ${EMBED_ALLOW_CPU_FALLBACK:-1}
+      EMBED_HOST: ${EMBED_HOST:-0.0.0.0}
+      EMBED_PORT: ${EMBED_PORT:-8080}
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      EMBED_SERVER_BIN: ${EMBED_SERVER_BIN:-}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/clipembed.sh"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+volumes:
+  hf-hub-cache:
+  run-state:

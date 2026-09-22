@@ -1,0 +1,136 @@
+# vLLM Pod manifest.
+#
+# v1.1.0 contracts:
+#   - Single ENGINE_ARGS env on both containers (cmdline syntax for vLLM).
+#   - Shared HF cache PVC mounted at /cache/hf/hub on both containers.
+#     See deploy/k8s/vllm/shared-pvc.example.yaml for the PVC template
+#     (RWX recommended for cross-Pod dedup; RWO works for single-Pod).
+#   - The model-spec is seeded from MODEL_MODE (+ optional MODEL_SUPPORTS)
+#     and persisted at MODEL_SPEC_PATH (default ${RUN_DIR}/model-spec.json,
+#     here the run-state emptyDir). To ship a fuller spec, uncomment the
+#     model-spec ConfigMap volume/mount + MODEL_SPEC_PATH env below.
+#
+# Customise the placeholders before applying:
+#   <MODEL_NAME>           e.g. qwen2.5-7b-instruct
+#   <MODEL_SOURCE>         e.g. hf://Qwen/Qwen2.5-7B-Instruct
+#   <ENGINE_ARGS>          e.g. --max-model-len 8192 --gpu-memory-utilization 0.9
+#   <HF_PVC>               RWX PVC for the shared HF cache
+#   <SPEC_CONFIGMAP>       (optional) ConfigMap holding model-spec.json; only
+#                          if you uncomment the model-spec volume + mount below
+#   <LLM_INIT_IMAGE>       pinned llm-init image, e.g. docker.io/beclab/llm-init:v1.1.0
+#
+# A matching Service lives in service.yaml; apply both.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: <MODEL_NAME>
+  labels:
+    app.kubernetes.io/name: llm-init
+    app.kubernetes.io/component: <MODEL_NAME>
+    llm-init.io/engine: vllm
+spec:
+  restartPolicy: Always
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: hf-cache
+      persistentVolumeClaim:
+        claimName: <HF_PVC>
+    - name: run-state
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
+    - name: wrappers
+      configMap:
+        name: llm-init-wrappers
+        defaultMode: 0o555
+    # Optional: ship a full capability spec via ConfigMap instead of the
+    # MODEL_MODE/MODEL_SUPPORTS env seed. Uncomment this volume, the
+    # matching volumeMount, and the MODEL_SPEC_PATH env below.
+    # - name: model-spec
+    #   configMap:
+    #     name: <SPEC_CONFIGMAP>
+    #     items:
+    #       - key: model-spec.json
+    #         path: model-spec.json
+  containers:
+    - name: llm-init
+      image: <LLM_INIT_IMAGE>
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - { name: ENGINE_KIND,    value: vllm }
+        - { name: MODEL_NAME,     value: <MODEL_NAME> }
+        - { name: MODEL_MODE,     value: chat }
+        # - { name: MODEL_SUPPORTS, value: "supports_reasoning,supports_vision" }
+        - { name: MODEL_SOURCE,   value: "<MODEL_SOURCE>" }
+        - { name: HF_ENDPOINT,    value: "https://huggingface.co" }
+        # HF_TOKEN should come from a Secret in production:
+        # - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf-token, key: token } } }
+        - { name: ENGINE_ARGS,    value: "<ENGINE_ARGS>" }
+        - { name: RUN_DIR,        value: /run/llm-init }
+        - { name: PORT,           value: "8080" }
+        - { name: LOG_LEVEL,      value: info }
+        - { name: LOG_FORMAT,     value: json }
+        # Pair with the optional model-spec ConfigMap (disk wins over env):
+        # - { name: MODEL_SPEC_PATH, value: /etc/llm-init/model-spec.json }
+      ports:
+        - { containerPort: 8080, name: http }
+      volumeMounts:
+        - { name: hf-cache,   mountPath: /cache/hf/hub }
+        - { name: run-state,  mountPath: /run/llm-init }
+        # - { name: model-spec, mountPath: /etc/llm-init/model-spec.json, subPath: model-spec.json, readOnly: true }
+      livenessProbe:
+        httpGet: { path: /livez, port: 8080 }
+        periodSeconds: 30
+        timeoutSeconds: 5
+      readinessProbe:
+        httpGet: { path: /readyz, port: 8080 }
+        periodSeconds: 5
+        timeoutSeconds: 3
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+    - name: engine
+      # Pinned to v0.20.1; bump via https://github.com/vllm-project/vllm/releases.
+      image: vllm/vllm-openai:v0.20.1
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "/llm-init/wrappers/vllm.sh"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - { name: ENGINE_KIND,  value: vllm }
+        - { name: MODEL_NAME,   value: <MODEL_NAME> }
+        - { name: VLLM_PORT,    value: "8000" }
+        - { name: WAIT_TIMEOUT, value: "3600" }
+        - { name: ENGINE_ARGS,  value: "<ENGINE_ARGS>" }
+      volumeMounts:
+        - { name: hf-cache,  mountPath: /cache/hf/hub, readOnly: true }
+        - { name: run-state, mountPath: /run/llm-init, readOnly: true }
+        - { name: wrappers,  mountPath: /llm-init/wrappers, readOnly: true }
+      ports:
+        - { containerPort: 8000, name: vllm }
+      readinessProbe:
+        httpGet: { path: /v1/models, port: 8000 }
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        failureThreshold: 60   # ~10 min model load budget
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+          memory: 16Gi
+        limits:
+          nvidia.com/gpu: 1
+          memory: 32Gi

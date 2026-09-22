@@ -1,0 +1,35 @@
+download-init/
+olares-ollama/
+
+# Go build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python (tests/compat)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local commit message scratch (should not be tracked)
+.git-commit-msg.tmp
+
+# Local docs-serve runtime log (mkdocs / similar) — not part of the repo
+docs-serve.log
+
+# Local developer convenience scripts — not shipped
+scripts/preview-ui.sh
+scripts/docker-build-amd64.sh

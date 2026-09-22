@@ -1,0 +1,804 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+# Default to least privilege at the workflow level (read-only on
+# contents, no other scopes). Jobs that need more — `docker` for
+# `packages: write` to push to ghcr, `release` for `contents: write`
+# to publish the GitHub Release — declare it explicitly under their
+# own `permissions:` block. This prevents an accidental new job from
+# inheriting unnecessary write scopes.
+permissions:
+  contents: read
+
+# Cancel-in-progress is scoped to PR runs only. A noisy PR push
+# (e.g. force-push during review) cancels the previous run and saves
+# the GHA budget; a `push` to `main` or a tag never cancels — those
+# runs feed the docker / release jobs and a partial cancellation
+# would leave the registry / release in an inconsistent state.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────
+  # Always-on jobs (PR + push). Total target budget: ≤ 90 s wall-clock.
+  # ────────────────────────────────────────────────────────────────────
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    # Read-only on contents is sufficient: this job builds, vets,
+    # tests, and uploads coverage. No registry, no release writes.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          # Pinned to 1.26.6 so govulncheck clears GO-2026-6218
+          # (quadratic resolvePath in net/url), GO-2026-6090
+          # (crypto/tls post-handshake), GO-2026-6089 (net/http
+          # ReadHeaderTimeout on HTTP/2 check), GO-2026-5972
+          # (encoding/asn1 recursion), GO-2026-5026 (idna Punycode),
+          # plus earlier stdlib CVEs (GO-2026-5856 / 4976 / 4971 /
+          # 4918). go.mod's `go 1.23.0` directive is the
+          # downstream-consumer floor, separate from this build
+          # toolchain pin.
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Verify modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+
+      - name: Coverage gate
+        run: |
+          go tool cover -func=coverage.out | tail -n 1
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          min=70.0
+          echo "total coverage: ${total}% (gate: ${min}%)"
+          awk -v t="$total" -v m="$min" 'BEGIN { if (t+0 < m+0) { printf "FAIL: coverage %.1f%% is below the %.1f%% gate\n", t, m; exit 1 } }'
+
+      - name: Render coverage HTML
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.html
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Build
+        run: |
+          mkdir -p bin
+          go build -trimpath -o bin/llm-init ./cmd/llm-init
+
+      - name: Smoke test binary
+        run: ./bin/llm-init --version
+
+  # Offline download suite (tag: download). Exercises every MODEL_SOURCE
+  # channel (url / hf / ollama / ollama-url) and its abnormal conditions
+  # against in-process mocks (faultsrv + mockollama + fakehf) — no
+  # network, daemons, or docker. Kept as its own job so the ~20s runtime
+  # (dominated by one real retry-budget case) does not eat the always-on
+  # test job's ≤90s budget; both run in parallel. See
+  # tests/download/README.md.
+  download:
+    name: Download suite (offline)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Download suite
+        run: go test -tags download -timeout 5m ./tests/download/...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        # Lint job uses Go 1.26, the same version as build/test. The v1
+        # constraint that pinned Go to 1.24 (golangci-lint v1.64.8's
+        # embedded typechecker rejected `//go:build go1.26` directives
+        # in the stdlib it tried to parse) does not apply to v2: the
+        # v2.12.2 binary is built with Go 1.26 and reads the matching
+        # stdlib without complaint. The .golangci.yml `run.go: 1.23`
+        # directive still controls the consumer FLOOR our code is
+        # checked AGAINST, separate from the toolchain version.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: golangci-lint
+        # Pinned to v2.12.2 with the v8 action. v2 migration train
+        # (Track F.2, v1.0.6): config schema changed (`linters: default:
+        # none`, `linters.settings:` replacing `linters-settings:`,
+        # `formatters:` block for gofmt/goimports), but the rule set
+        # and zero-finding contract are unchanged. The action's v8
+        # major release tracks the v2 binary line; v6 is v1-only.
+        #
+        # Local re-run instructions:
+        #   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+        #   golangci-lint run --timeout=5m
+        #
+        # Version-bump checklist when moving past v2.12.x:
+        #   1. Run `golangci-lint migrate --skip-validation` against a
+        #      copy of `.golangci.yml`; v2 -> v3 will need its own
+        #      schema sweep when the time comes.
+        #   2. Verify `golangci-lint run --timeout=5m` is zero-finding
+        #      locally before bumping CI.
+        #   3. Update both `version:` and the action SHA in lockstep
+        #      with the .golangci.yml comment block.
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          version: v2.12.2
+          # --timeout=5m (default is 1m; large file count on
+          # this tree pushes the analysis past 1m on cold caches).
+          # The default exit code on findings is non-zero, which
+          # is what makes this a real gate; we deliberately do
+          # NOT pass --issues-exit-code=0.
+          args: --timeout=5m
+
+  # Static deploy-template + spec validation. Cheap, runs on every PR
+  # so authors get fast feedback when a docker-compose or k8s file goes
+  # off the rails.
+  compose-validate:
+    name: Validate compose + k8s
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate docker-compose templates
+        run: |
+          set -euxo pipefail
+          export MODEL_NAME=ci-validate
+          export MODEL_SOURCE=hf://ci/repo
+          # Standalone stacks only. Overlays (partial service patches) are
+          # validated merged with their base file below — e.g. embed.gpu.yml
+          # has no image/build on its own.
+          for f in deploy/compose/*.yml; do
+            case "$f" in
+              *.overlay.yml|*.integration.yml|deploy/compose/embed.gpu.yml|deploy/compose/rerank.gpu.yml) continue ;;
+            esac
+            echo "::group::compose config $f"
+            docker compose -f "$f" --env-file deploy/compose/.env.example config -q
+            echo "::endgroup::"
+          done
+          echo "::group::compose config deploy/compose/embed.yml + embed.gpu.yml"
+          docker compose \
+            -f deploy/compose/embed.yml \
+            -f deploy/compose/embed.gpu.yml \
+            --env-file deploy/compose/.env.example config -q
+          echo "::endgroup::"
+          echo "::group::compose config deploy/compose/rerank.yml + rerank.gpu.yml"
+          docker compose \
+            -f deploy/compose/rerank.yml \
+            -f deploy/compose/rerank.gpu.yml \
+            --env-file deploy/compose/.env.example config -q
+          echo "::endgroup::"
+          echo "::group::compose config deploy/compose/rerank.yml + rerank.integration.yml"
+          docker compose \
+            -f deploy/compose/rerank.yml \
+            -f deploy/compose/rerank.integration.yml \
+            --env-file deploy/compose/.env.example config -q
+          echo "::endgroup::"
+
+      - name: Validate k8s manifests
+        # kubectl 1.27+ requires a live apiserver even for
+        # --dry-run=client (it fetches OpenAPI to "recognize"
+        # types) and even with --validate=false it still bails
+        # at "unable to recognize ...: dial tcp [::1]:8080:
+        # connection refused". A hosted runner has no
+        # apiserver, so this lane never worked the way the
+        # original kubectl-based recipe assumed; before the
+        # v1.0.5 train CI had simply never run, and the bug
+        # had been waiting in the workflow file the whole
+        # time.
+        #
+        # kubeconform is the offline alternative: it bundles
+        # Kubernetes OpenAPI-derived JSON schemas in a separate
+        # repository (kubernetes-json-schema) and validates
+        # YAML against them locally, no cluster needed. Pinned
+        # by version tag so a future upstream release can't
+        # move the gate under us; -summary keeps the log noise
+        # low for the happy path; -kubernetes-version pins
+        # what apiserver semver the field availability check
+        # is keyed against (1.30.5 matches the kubectl version
+        # we used to install here, so an operator at v1.30
+        # sees the same behaviour as the gate).
+        run: |
+          set -euxo pipefail
+          KCV=v0.6.7
+          curl -sSLo /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KCV}/kubeconform-linux-amd64.tar.gz"
+          tar -C /tmp -xzf /tmp/kubeconform.tar.gz kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+          for d in deploy/k8s/*/; do
+            echo "::group::kubeconform $d"
+            kubeconform -summary -strict -kubernetes-version 1.30.5 "$d"
+            echo "::endgroup::"
+          done
+
+  # Wrappers: shellcheck plus the tests under tests/wrappers. Those tests
+  # existed since the audio wrapper landed but nothing ran them, which is
+  # how one of them kept forbidding supervise_engine — a thing the roadmap
+  # was moving towards — without anybody noticing. They need no Go
+  # toolchain, no docker and no model: each drives a wrapper against fake
+  # engine binaries.
+  wrappers:
+    # Display name is a branch-protection required check. 8ec5266
+    # renamed it to "Wrappers (shellcheck + tests)" and PRs then sat
+    # on "Expected — Waiting for status to be reported" forever.
+    name: Shellcheck wrappers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: ./deploy/wrappers
+          severity: error
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: ./tests/wrappers
+          severity: error
+      - name: Wrapper tests
+        # /bin/sh on the runner is dash, which is the point: the engine
+        # images have no bash and common.sh is POSIX sh.
+        run: |
+          set -eu
+          for t in tests/wrappers/*_test.sh; do
+            echo "::group::$t"
+            sh "$t"
+            echo "::endgroup::"
+          done
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Blocking informational gate. govulncheck cross-references the
+    # loaded go.mod against vuln.go.dev and only reports CVEs that
+    # actually reach a vulnerable function in the call graph. With the
+    # CI Go toolchain pinned to 1.26.6, govulncheck clears GO-2026-6218 / 6090 /
+    # 6089 / 5972 / 5026 (Go 1.26.6 stdlib patch) plus earlier
+    # findings (GO-2026-5856 / 4976 / 4971 / 4918), so the job
+    # blocks on red. If a future stdlib CVE lands before the next
+    # Go patch release, bump `go-version:` here as the response;
+    # routing around the gate (continue-on-error / removing this from
+    # ci) is not the answer.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+      - name: Install govulncheck
+        # Pin govulncheck so a future major release (e.g. new finding
+        # taxonomy or stricter exit codes) cannot break the gate without
+        # a deliberate bump here. Keep in sync with the `Makefile` target.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  # ────────────────────────────────────────────────────────────────────
+  # Path-filter gate for the heavy jobs below. Tag pushes always run
+  # them; PRs run them only if the diff touches a path that could
+  # actually change the surface those jobs validate. This closes the
+  # gap that let Dependabot PRs touching `tests/compat/requirements.txt`
+  # land green without compat ever running (caught at v1.0.5 tag-cut
+  # time on `langchain-openai==1.1.14` ↔ `openai==1.51.2` conflict).
+  #
+  # The job runs on every event but is cheap (~5s) — it only emits
+  # boolean outputs that downstream `if:` clauses consume.
+  # ────────────────────────────────────────────────────────────────────
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # paths-filter calls the GitHub API listFiles endpoint for the
+      # PR, which the default `contents: read` token cannot reach.
+      # `pull-requests: read` is the minimum scope that lets the
+      # filter compute a real diff; without it the action fails with
+      # "Resource not accessible by integration" and gates the heavy
+      # jobs to never run on PRs (the opposite of what we want).
+      pull-requests: read
+    outputs:
+      compat: ${{ steps.filter.outputs.compat }}
+      integration: ${{ steps.filter.outputs.integration }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          # Conservative filters: a touched path implies the test
+          # *could* be affected, never the other way around. False
+          # positives (running compat when nothing changed) are fine;
+          # false negatives (skipping compat when it should have run)
+          # would re-open the gap this job exists to close.
+          #
+          # Track G.1 (v1.0.7): narrowed `internal/adapter/**` to the
+          # two sub-packages that actually translate/forward HTTP
+          # bytes — `ollama/` (OpenAI ↔ Ollama shape conversion) and
+          # `proxy/` (the request-body rewriter for vLLM/llama.cpp/
+          # SGLang). The previous wildcard also matched
+          # `internal/adapter/factory/**` (3 files of `switch
+          # cfg.Engine.Kind`-style glue) and the top-level
+          # `internal/adapter/adapter.go` (interface defs only). Edits
+          # to those files cannot change wire format because they
+          # don't read or write any bytes; the type signatures already
+          # gate compile-time. Net effect: a Dependabot PR bumping
+          # only `internal/adapter/factory/factory.go` no longer
+          # forces a 3-5 min compat / integration run on every push.
+          filters: |
+            compat:
+              - 'tests/compat/**'
+              - 'cmd/llm-init/**'
+              - 'internal/adapter/ollama/**'
+              - 'internal/adapter/proxy/**'
+              - 'internal/controlplane/**'
+              - 'internal/dataplane/**'
+              - 'Dockerfile*'
+              - '.github/workflows/ci.yml'
+            integration:
+              - 'tests/integration/**'
+              - 'cmd/llm-init/**'
+              - 'internal/lifecycle/**'
+              - 'internal/dataplane/**'
+              - 'internal/adapter/ollama/**'
+              - 'internal/adapter/proxy/**'
+              - 'internal/fetch/**'
+              - 'Dockerfile*'
+              - 'deploy/compose/**'
+              # Wrappers are bind-mounted into the engine container at
+              # runtime (see deploy/compose/<engine>.yml -- e.g. the
+              # `../wrappers:/llm-init/wrappers:ro` line in llamacpp.yml).
+              # The image build doesn't pick them up; the running engine
+              # does. So a one-line edit to deploy/wrappers/llamacpp.sh
+              # can break integration without changing any tracked path
+              # this filter previously matched, which is exactly how the
+              # Track P.9.B regression (bare `exec llama-server` against
+              # an upstream image that moved the binary to /app) silently
+              # shipped in v1.0.5/v1.0.6/v1.0.7. Add Track P.9.A.3.
+              - 'deploy/wrappers/**'
+              - '.github/workflows/ci.yml'
+
+  # ────────────────────────────────────────────────────────────────────
+  # Heavy jobs. Run on every tag push and on PRs whose diff matched the
+  # corresponding path filter above. Pre-v1.0.5 these were tag-only,
+  # which is how Dependabot PR #7 (langchain-openai bump) reached main
+  # without compat ever running.
+  # ────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration (llamacpp)
+    runs-on: ubuntu-latest
+    needs: [changes, test, lint, compose-validate]
+    # Trigger expansion (Track P.9.A.2, v1.0.8): also run on direct
+    # pushes to main when integration paths changed. Pre-P.9.A.2 this
+    # gate only fired on tag pushes and PRs, which meant every release
+    # cut (v1.0.5/v1.0.6/v1.0.7) was the FIRST time integration ran
+    # against the merged state — and every one of them timed out at
+    # WaitReady's 8-minute budget with no container logs (P.9.A fixed
+    # the log half; this fixes the trigger half so we surface failures
+    # on main BEFORE tagging). Forks/branches still rely on PR runs;
+    # this only widens the main + tag coverage.
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.integration == 'true') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.integration == 'true')
+    timeout-minutes: 18
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      # Build llm-init image first so the compose file's
+      # `${LLM_INIT_IMAGE}` resolves to a freshly built image (CI
+      # never pulls a release tag of itself).
+      - name: Build llm-init image
+        run: docker build -t llm-init:ci-${{ github.sha }} .
+
+      - name: Run llamacpp integration test
+        env:
+          LLM_INIT_IMAGE: llm-init:ci-${{ github.sha }}
+          MODEL_NAME: tinyllama-q4
+          # Authenticated HF pulls get a much higher rate limit than the
+          # anonymous CI egress pool; without this, GHA runners routinely
+          # hit 429 on the TinyLlama integration download and stall until
+          # WaitReady times out even though lifecycle correctly retries.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # 14m: WaitReady is up to 10m (HF CDN + 429 backoff variance),
+          # compose-up adds ~2m, probe + teardown add ~1m.
+          # Job-level timeout-minutes: 18 above is the outer guard.
+          go test -tags integration -timeout 14m -v ./tests/integration/llamacpp/...
+
+      - name: Upload baseline.json (rolling)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: integration-baseline
+          path: tests/integration/baseline.json
+          if-no-files-found: warn
+          # Match the `coverage` artifact above. Without an explicit
+          # value GitHub falls back to the org / repo default (often
+          # 90 days), which silently inflates artifact storage. 14
+          # days is enough to bisect a regression backwards a sprint
+          # while keeping per-run footprint predictable.
+          retention-days: 14
+
+      # Track G.3 (v1.0.7): per-tag retention. On a release-tag run
+      # (refs/tags/v*) we ALSO upload baseline.json as a tag-named
+      # artifact with the maximum retention GitHub Free permits (90
+      # days, the default org-level cap). The rolling artifact above
+      # is good for "did the last 14 days drift?" bisection; the
+      # tag-named artifact is the operator-facing perf record for
+      # that exact release, used by:
+      #
+      #   - operators investigating "v1.0.5 was 8% faster than v1.0.7
+      #     on llamacpp ttft_ms; why?" — without the tag-named
+      #     artifact, the v1.0.5 numbers would have aged out of the
+      #     rolling artifact at v1.0.5+14d.
+      #
+      #   - the release: job below, which signs and bundles
+      #     baseline.json into the GitHub Release page. That bundle
+      #     happens at tag-time anyway, but the artifact is a
+      #     belt-and-suspenders backup if cosign / Release upload
+      #     fails after the integration suite ran.
+      #
+      # 90 days is the org cap on the free tier; setting a higher
+      # number is silently truncated. If we need real long-term
+      # retention (>90 days) for a v1.x train, bump the org-level
+      # cap or push the baseline into a separate long-lived storage
+      # (S3, the gh-pages branch, etc.) — out of scope for this
+      # workflow change.
+      - name: Upload baseline.json (tag-pinned)
+        # `always()` first by convention -- it is the override for the
+        # implicit success() gate that GHA applies when `if:` is set.
+        # The startsWith() narrows to tag runs only.
+        if: always() && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          # The tag name is part of the artifact name so multiple
+          # tag runs do not collide on a single shared artifact.
+          # github.ref_name evaluates to e.g. "v1.0.6" on a tag push.
+          name: integration-baseline-${{ github.ref_name }}
+          path: tests/integration/baseline.json
+          if-no-files-found: error # tag run with no baseline is a CI bug
+          retention-days: 90
+
+  compat:
+    name: Compatibility (Python clients)
+    runs-on: ubuntu-latest
+    needs: [changes, test, lint, compose-validate]
+    # Trigger expansion: mirror the integration job so compat also runs
+    # on direct pushes to main when compat paths changed — pre-this the
+    # job only fired on tags + filtered PRs, so a release cut was the
+    # first time compat saw the merged main state (the same gap the
+    # integration job closed in Track P.9.A.2).
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'pull_request' && needs.changes.outputs.compat == 'true') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.compat == 'true')
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned client deps
+        run: python -m pip install -r tests/compat/requirements.txt
+
+      - name: Build llm-init image
+        run: docker build -t llm-init:ci-${{ github.sha }} .
+
+      - name: Run pytest
+        env:
+          LLM_INIT_IMAGE: llm-init:ci-${{ github.sha }}
+          MODEL_NAME: tinyllama-q4
+        run: pytest tests/compat -v
+
+  # PR-only image build (no push). The `docker` job below runs only on
+  # `push` events, so before this lane a Dockerfile regression (bad base
+  # image, broken pip install, COPY path drift) was invisible until it
+  # merged to main and the publish job failed. This builds the same
+  # Dockerfile on PRs — single-arch amd64 for speed, GHA-cached, never
+  # pushed — so the breakage surfaces in review instead of on main.
+  docker-build-pr:
+    name: Docker build (PR, no push)
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image (amd64, load to local engine, no push)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: llm-init:pr-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Multi-arch image push. Runs on every push to main and on tags.
+  # Gated on every static validation job AND `vulncheck` so a green image
+  # always implies (a) the deployment templates shipping with it parse
+  # cleanly, and (b) the binary baked into the image is free of
+  # known stdlib / module CVEs reachable from our call graph. The `release`
+  # job below transitively inherits this gate via `needs: [docker, ...]`.
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    # integration + compat added to the gate (was static-validation only):
+    # a published image — including main's :latest — must not ship ahead
+    # of the integration / compat suites. On a main push where those
+    # paths did not change the jobs are skipped, and a skipped need is
+    # treated as satisfied (not failed), so docker still publishes; when
+    # they DO run, a red result now blocks the push. Tag pushes always
+    # run both, so :version is always gated.
+    needs: [test, lint, compose-validate, wrappers, vulncheck, integration, compat]
+    if: github.event_name == 'push'
+    # Override the read-only top-level grant: this job is the only one
+    # that pushes images to docker.io. `contents: read` is restated for
+    # explicitness. `id-token: write` stays for BuildKit's provenance
+    # attestation (the OIDC token names this workflow run as the
+    # build origin) and for cosign keyless signing in the release job.
+    # `packages: write` was removed in Track P.10 along with the GHCR
+    # cutover; Docker Hub auth happens through DOCKERHUB_USERNAME +
+    # DOCKERHUB_PASS secrets, not GHCR's GITHUB_TOKEN.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        # Track P.10 (v1.0.8): migrated from ghcr.io to docker.io.
+        # DOCKERHUB_USERNAME + DOCKERHUB_PASS are repo-level secrets
+        # the owner sets manually; the username only authenticates the
+        # push, the published namespace is hardcoded to docker.io/beclab
+        # below (the same person can push to beclab/llm-init as long as
+        # they're an org member, regardless of their personal username).
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          # Track P.10: image namespace is the org account on Docker
+          # Hub, NOT the pushing user. Hardcoded to docker.io/beclab
+          # — `github.repository_owner` ("beclab") happens to match
+          # here but is a coincidence, not a contract; forks that flip
+          # the DH org should edit this line.
+          echo "image=docker.io/beclab/llm-init" >> $GITHUB_OUTPUT
+
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', steps.meta.outputs.image) || '' }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          # Supply-chain attestations (BuildKit native; no cosign needed):
+          # - provenance=true emits SLSA-style build provenance pointing
+          #   at this workflow run.
+          # - sbom=true ships an SPDX SBOM as a referrer of the image.
+          # Docker Hub shows both under the tag's "Attestations" tab.
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # GitHub Release. Body is read verbatim from CHANGELOG.md so the
+  # human-curated narrative wins over auto-generated changelogs.
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [docker, integration, compat]
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Override the read-only top-level grant. The release job:
+    #   * `contents: write` -- writes the GitHub Release and uploads
+    #     binary / SHA256SUMS / signature / certificate assets.
+    #   * `actions: read`   -- reads the integration baseline.json
+    #     uploaded by the `integration` job via download-artifact.
+    #   * `id-token: write` -- required for cosign keyless signing
+    #     (commit #21): cosign exchanges the OIDC token issued by
+    #     GitHub Actions for a Sigstore Fulcio short-lived
+    #     certificate, then signs the release blobs with it. Without
+    #     this scope the OIDC step fails and signing is skipped.
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: "1.26.6"
+          cache: true
+
+      - name: Build static binary for release artifact
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-s -w \
+            -X github.com/llm-init/llm-init/internal/version.Version=${VERSION} \
+            -X github.com/llm-init/llm-init/internal/version.Commit=${COMMIT} \
+            -X github.com/llm-init/llm-init/internal/version.BuildTime=${BUILD_TIME}"
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build \
+              -trimpath -ldflags "$LDFLAGS" \
+              -o dist/llm-init-linux-$arch ./cmd/llm-init
+          done
+          dist/llm-init-linux-amd64 --version | grep -F "llm-init ${VERSION}"
+
+      - name: Download integration baseline
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: integration-baseline
+          path: dist/
+
+      - name: Generate SHA256SUMS
+        # One file covers every binary plus the integration baseline.
+        # Operators who download just one artifact can verify it with
+        # `sha256sum -c --ignore-missing SHA256SUMS`. The file is
+        # itself signed below, so a tampered SHA256SUMS is detectable.
+        working-directory: dist
+        run: |
+          set -euxo pipefail
+          sha256sum llm-init-linux-amd64 llm-init-linux-arm64 baseline.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        # Pin to cosign v2.6.3 (Track P.11.B): the installer otherwise
+        # tracks latest, and cosign v3.0.0 flipped --new-bundle-format
+        # to default-on, which broke our `sign-blob` call that emits
+        # the legacy {.sig, .pem} pair (the v1.0.8 first tag-CI release:
+        # job died at this step with `create bundle file: open : no
+        # such file or directory` because v3 expected a --bundle path).
+        # v2.6.3 is the last v2.6.x release with all GHSA fixes (resolves
+        # GHSA-w6c6-c85g-mmv6 + GHSA-whqx-f9j3-ch6m) but still defaults
+        # the bundle format off so the existing release artifact list
+        # (`.sig` + `.pem` per blob) stays correct. Bumping to v3 later
+        # will require adding --new-bundle-format=false OR migrating
+        # the release artifact list to .sigstore bundles.
+        #
+        # Keyless signing flow: cosign requests an OIDC token from
+        # GitHub Actions (id-token: write on the job), exchanges it
+        # for a short-lived Sigstore Fulcio cert tied to this exact
+        # workflow + ref, and signs each blob with that ephemeral
+        # key. Verification is offline-after-fetch via the Rekor
+        # transparency log entry recorded for free at sign time.
+        # No private key material is stored or rotated.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.3
+
+      - name: Sign release blobs (keyless)
+        # We sign every individual binary plus SHA256SUMS, so the
+        # operator can choose the ergonomics they prefer:
+        #   * fast path: verify SHA256SUMS once, then `sha256sum -c`
+        #     for the binaries.
+        #   * paranoid path: verify each binary's signature directly.
+        # Either way the trust root is Sigstore Fulcio + Rekor, NOT a
+        # long-lived signing key on this repo.
+        working-directory: dist
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euxo pipefail
+          for f in llm-init-linux-amd64 llm-init-linux-arm64 SHA256SUMS; do
+            cosign sign-blob \
+              --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "$f"
+          done
+
+      - name: Publish release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          body_path: CHANGELOG.md
+          files: |
+            dist/llm-init-linux-amd64
+            dist/llm-init-linux-arm64
+            dist/baseline.json
+            dist/SHA256SUMS
+            dist/llm-init-linux-amd64.sig
+            dist/llm-init-linux-amd64.pem
+            dist/llm-init-linux-arm64.sig
+            dist/llm-init-linux-arm64.pem
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.pem
+          # Pre-fix this was `false` so a missing dist/baseline.json (e.g.
+          # the integration job ran but the artifact upload failed silently)
+          # would publish a half-empty Release with the binaries but no
+          # perf baseline, and no CI signal that anything went wrong. Set
+          # to `true`: every file in the list above must exist or the
+          # release step fails loud, the tag is preserved, and the
+          # operator can re-run after fixing the artifact.
+          fail_on_unmatched_files: true

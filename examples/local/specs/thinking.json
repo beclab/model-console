@@ -1,0 +1,29 @@
+{
+  "name": "qwen3-0.6b",
+  "mode": "chat",
+  "label": { "en_US": "Qwen3 0.6B (thinking)" },
+  "supports": {
+    "supports_reasoning": true,
+    "supports_reasoning_effort": true,
+    "supports_native_streaming": true,
+    "supports_function_calling": true
+  },
+  "parameter_rules": [
+    {
+      "name": "reasoning_effort",
+      "type": "string",
+      "label": { "en_US": "Reasoning effort" },
+      "help": {
+        "en_US": "Qwen3 has an on/off switch rather than graded effort: none turns thinking off, every other value turns it on."
+      },
+      "default": "medium",
+      "options": ["none", "low", "medium", "high"]
+    }
+  ],
+  "extensions": {
+    "thinking_default": "auto",
+    "chat_template_kwargs": { "enable_thinking": true }
+  },
+  "context_size": 32768,
+  "max_output_tokens": 4096
+}

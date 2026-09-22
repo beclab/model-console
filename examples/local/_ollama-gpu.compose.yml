@@ -1,0 +1,22 @@
+# GPU override for the ollama examples. Layered on top of
+# deploy/compose/ollama.yml when USE_GPU=1 is set on the runner.
+#
+# Unlike llama.cpp, the ollama daemon ships a single image with CUDA /
+# ROCm / CPU paths in the same binary -- it auto-selects at boot based
+# on which devices are visible. So this override only grants devices;
+# no image swap is needed.
+#
+# Pre-flight on the host with
+#   docker run --rm --gpus all nvidia/cuda:<tag> nvidia-smi
+# and confirm /api/ps reports a non-zero `size_vram` once a model is
+# loaded.
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,7 @@
+{
+  "name": "nomic-embed-text",
+  "mode": "embedding",
+  "label": { "en_US": "Nomic Embed Text v1.5" },
+  "supports": { "supports_native_streaming": false },
+  "context_size": 8192
+}

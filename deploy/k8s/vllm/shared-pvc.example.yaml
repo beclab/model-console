@@ -1,0 +1,51 @@
+# Example shared HF cache PVC for the vLLM Pod template.
+#
+# Mount target inside the container is /cache/hf/hub (fixed by the
+# v1.1.0 deployment contract). RWX is
+# recommended so multiple Pods on the same cluster reuse the same HF
+# cache and dedup downloads (Pod #1 downloads, Pods #2..N hit cache).
+# RWO works for single-Pod deployments.
+#
+# Adjust:
+#   namespace
+#   storageClassName  -- must be an RWX-capable provider for the
+#                        cross-Pod dedup story (cephfs, NFS,
+#                        Longhorn-RWX, EFS-CSI, ...). For RWO use
+#                        any default StorageClass.
+#   resources.requests.storage  -- size for your model corpus.
+#                        Each 7B safetensors model ~15 GB; each 7B
+#                        Q4_K_M GGUF ~5 GB. Plan ~1.2x sum of all
+#                        models you intend to serve from this cluster.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-hub-cache
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: <your-rwx-storage-class>
+  resources:
+    requests:
+      storage: 50Gi
+---
+# OPTIONAL ConfigMap holding a full model capability spec. Only needed if
+# you uncomment the model-spec volume/mount + MODEL_SPEC_PATH env in
+# pod.yaml; otherwise MODEL_MODE (+ MODEL_SUPPORTS) seeds the spec and this
+# ConfigMap can be skipped when the model spec already exists.
+# for the schema.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-spec-<MODEL_NAME>
+data:
+  model-spec.json: |
+    {
+      "name": "<MODEL_NAME>",
+      "mode": "chat",
+      "label": { "en_US": "<MODEL_NAME>" },
+      "supports": {
+        "supports_function_calling": true,
+        "supports_native_streaming": true
+      },
+      "context_size": 32768,
+      "max_output_tokens": 4096
+    }

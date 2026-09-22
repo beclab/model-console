@@ -1,0 +1,109 @@
+# Manual Docker image build + push. Use when you need an image from a
+# feature branch without merging to main or cutting a release tag.
+#
+# GitHub UI: Actions → "Docker (manual)" → Run workflow
+#   - "Use workflow from": pick the branch to build
+#   - image_tag: Docker Hub tag, e.g. feat-irembed-amd64
+#
+# Builds the selected branch (no separate git ref input). Platforms default
+# to linux/amd64,linux/arm64.
+#
+# Requires repo secrets: DOCKERHUB_USERNAME, DOCKERHUB_PASS
+# Publishes to: docker.io/beclab/llm-init:<image_tag>
+
+name: Docker (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker Hub tag (e.g. feat-irembed-amd64)"
+        required: true
+        type: string
+
+env:
+  PLATFORMS: linux/amd64,linux/arm64
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: docker-manual-${{ github.workflow }}-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+jobs:
+  docker-manual:
+    name: Build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate image tag
+        run: |
+          tag='${{ inputs.image_tag }}'
+          if [[ "$tag" == "latest" ]]; then
+            echo "::error::Refusing to push :latest from a manual workflow. Use CI main push or pick another tag."
+            exit 1
+          fi
+          if [[ ! "$tag" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]; then
+            echo "::error::Invalid Docker tag: $tag"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "image=docker.io/beclab/llm-init" >> "$GITHUB_OUTPUT"
+          echo "Built ref: ${{ github.ref_name }} @ $COMMIT ($VERSION)"
+
+      - name: Build and push
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.image }}:${{ inputs.image_tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=manual-${{ inputs.image_tag }}
+          cache-to: type=gha,mode=max,scope=manual-${{ inputs.image_tag }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### Manual image published"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image | \`${{ steps.meta.outputs.image }}:${{ inputs.image_tag }}\` |"
+            echo "| branch | \`${{ github.ref_name }}\` |"
+            echo "| commit | \`${{ steps.meta.outputs.commit }}\` |"
+            echo "| version | \`${{ steps.meta.outputs.version }}\` |"
+            echo "| platforms | \`${{ env.PLATFORMS }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

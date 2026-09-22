@@ -1,0 +1,261 @@
+# golangci-lint config for llm-init.
+# Reference: https://golangci-lint.run/usage/configuration/
+#
+# v2 migration (Track F.2, 2026-05-16):
+#
+# This file is in v2 schema. Migrated from v1.64.8 via
+# `golangci-lint migrate --skip-validation`. The historical evaluations
+# pre-migration:
+#
+#                  v1.64.8     v2.12.2 pre-Track-C   v2.12.2 post-F.1
+#    total            0                 68                  31
+#    goconst          0                 65                  27
+#    staticcheck      0                  2                   0   (fixed inline)
+#    prealloc         0                  1                   1   (test-only; excluded)
+#    gofmt            0                  0                   0
+#
+# Track C (typed-struct refactor of internal/adapter/ollama/translate_*.go,
+# v1.0.5 train) cleared the largest single-file source of goconst noise
+# (translate_chat 16 -> 2, translate_completion 12 -> 2,
+#  translate_embed 8 -> 1, translate_models 2 -> 0).
+#
+# Track F.1 (per-package contract-string named constants, this train):
+# pulled cross-cutting label / header / mime literals out of inline
+# string form into named per-package constants in dataplane/metrics.go,
+# lifecycle/ensure.go, controlplane/{handlers,ui}.go, adapter/proxy/
+# {rewrite,adapter}.go. Net delta -12 (43 -> 31 v2 findings).
+#
+# The 27 residual goconst hits are not blocking quality, but they are
+# follow-up candidates: each is an inline string-literal that already
+# has a named constant somewhere in the same package, or could grow
+# one cheaply (e.g. internal/config/config.go's "chatml" already lives
+# as defaultGGUFTemplateName a few lines up). Tracked under v1.0.7
+# polish.
+#
+# To replay the migration:
+#   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+#   cp .golangci.yml .golangci.v1.bak.yml
+#   golangci-lint migrate --skip-validation
+#   golangci-lint run --timeout=5m
+#
+# v1 -> v2 schema differences worth knowing about:
+#   * `linters: disable-all: true` -> `linters: default: none`.
+#   * `linters-settings:` is now `linters.settings:`.
+#   * `issues.exclude-rules:` is now `linters.exclusions.rules:`.
+#   * `gofmt` / `goimports` are formatters, not linters; they live
+#     under the top-level `formatters:` block now.
+#   * `run.timeout` is silently ignored: timeout is `--timeout` on
+#     the CLI in v2 (we pass `--timeout=5m` from the CI workflow).
+#   * Comments are stripped by `migrate`; they need to be re-added
+#     by hand. This file is the post-migration restoration.
+
+version: "2"
+
+run:
+  # Match go.mod's `go 1.23.0` floor — pre-fix this stuck at 1.22 so
+  # 1.23-specific surface (range-over-func, go:wasmexport, generic
+  # type-alias updates) was lint-blind. CI's compile/test toolchain is
+  # pinned at 1.26 in .github/workflows/ci.yml — that's the build
+  # version, separate from the consumer floor we lint against here.
+  go: "1.23"
+
+linters:
+  default: none
+  enable:
+    # Default + commonly useful linters; we keep the set tight to avoid noise.
+    - bodyclose
+    - errcheck
+    - errorlint
+    - goconst
+    - gocritic
+    - gocyclo
+    - govet
+    - ineffassign
+    - misspell
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    errcheck:
+      # exclude-functions enumerates calls whose error return is
+      # idiomatically discarded. The list intentionally stays small;
+      # everything off it must be checked.
+      #
+      #   * io.Closer / *os.File / *http.Response.Body Close: the
+      #     canonical `defer x.Close()` pattern. The error is most
+      #     useful on Sync, not Close, and forcing a wrapper at every
+      #     defer site for a mostly-cosmetic warning costs more than
+      #     it gives. (Manifest write does fsync explicitly; that is
+      #     where durability is enforced -- see manifest.Write.)
+      #   * fmt.Fprint / Fprintf / Fprintln: writes to os.Stderr /
+      #     os.Stdout for CLI diagnostics, or to *bytes.Buffer in
+      #     tests; the failure modes are "stderr is closed" (process
+      #     already dead) or "out of memory" (test process already
+      #     dying). No useful recovery path.
+      #   * (*bufio.Writer).Write / .Flush in test fixtures: same
+      #     story; these write to in-memory pipes that don't fail.
+      #   * os.Setenv / os.Unsetenv in TestRun_NoEnvLeak: the test
+      #     deliberately uses os.Setenv (not t.Setenv) so it can run
+      #     in parallel; the syscall doesn't fail in practice.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*net/http.Response).Body.Close
+        # net.Conn / net.Listener don't unify under io.Closer for
+        # errcheck's exclude matcher, which keys on the call-site
+        # type, not on interface satisfaction. Enumerate the
+        # concrete close sites that come up in tests/fixtures.
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*bufio.Writer).Write
+        - (*bufio.Writer).Flush
+        - os.Setenv
+        - os.Unsetenv
+
+    gocyclo:
+      # 25 lets us keep the three "intentionally explicit" production
+      # functions: manifest.Diff (set-difference algorithm with several
+      # branches plus three ctx checkpoints), fetch.Download / attempt
+      # (HTTP retry path with 416-range handling), and the cmd/llm-init
+      # bootstrap. Refactoring those into smaller pieces obscures the
+      # contract; the explicit form is what the docs reference.
+      # config.Load was at 49 pre-split; it's now ~5 because the per-section
+      # work is a method on `loader` -- see config.go's loadEngine /
+      # loadModel / loadSource / loadInference / loadGGUF / loadRuntime /
+      # loadLog. Anything new above 25 is a "this needs to be split" signal.
+      min-complexity: 25
+
+    govet:
+      # shadow is intentionally NOT enabled. It flags every
+      # `if err := f(); err != nil { ... }` block as a shadow of the
+      # outer `err`, even when the outer is already-checked-nil and
+      # the inner is narrower-scope -- the canonical Go idiom. Out
+      # of 18 shadow findings in this tree at the v1.0.5 train, all
+      # 18 were that idiom; zero were real bugs. The juice (catching
+      # an actual outer-vs-inner mistake once a year) is not worth
+      # the squeeze (every PR carrying new error-checked work must
+      # rename inner err -> errN to placate the linter, fragmenting
+      # readability for no correctness gain). Google's Go style
+      # guide explicitly does not ban shadowing for this reason.
+      # If a contributor introduces a genuine "outer err set, inner
+      # shadow swallows it" bug, errcheck + the test suite catch
+      # it; we don't need shadow for defence in depth.
+      enable: []
+      disable:
+        - shadow
+
+    revive:
+      rules:
+        - name: var-naming
+        - name: package-comments
+        - name: exported
+          # checkPrivateReceivers: pre-v1.0.5 we asked revive to also
+          # check methods on unexported receivers. In practice that
+          # flagged every interface-implementor (managerSink.OnFileStart
+          # implements progress.Sink; memoryManager.Snapshot implements
+          # progress.Manager). The methods MUST stay capitalised --
+          # the interface contract demands it -- so the only "fix" is
+          # to write a doc comment for each of fifteen methods that
+          # already have a single, central doc on the interface
+          # method itself. Drop the option; the method-level docs are
+          # required ONLY for genuinely exported types.
+          # disableStutteringCheck stays on -- "fetch.FetchClient" style
+          # double-naming hits a lot of false positives in this tree.
+          arguments:
+            - disableStutteringCheck
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests legitimately call helpers with a single concrete value
+      # (so unparam fires "always receives X"), construct
+      # complicated table-driven setups (gocyclo), repeat short
+      # path strings ("/api/tags") for readability (goconst), and
+      # initialise empty slices with explicit `[]T{}` for clarity
+      # (prealloc). None of these are bugs in test code; suppress
+      # them in *_test.go to keep signal-to-noise high.
+      - linters:
+          - goconst
+          - gocyclo
+          - prealloc
+          - unparam
+        path: _test\.go
+      # parseIntInRange / parseBool are tiny config helpers whose
+      # call sites all pass the same min/key today. unparam wants
+      # them inlined or specialised, but the generic shape is what
+      # makes the validator readable -- it's the same function
+      # parameterised by limit/key for every integer / bool config
+      # var. Keep the signatures.
+      #
+      # goconst rationale: parseBool's switch case body is
+      # `case "1", "true", "yes", "on", "y", "t":` -- the literals
+      # ARE the contract operators type in env vars. Replacing them
+      # with `boolTrue`/`boolFalse` constants fragments the parser
+      # at exactly the readability point that matters (which
+      # spelling belongs to the truthy group), and parseLlamacppNGL
+      # has the same shape for "all"/"auto". The package-count
+      # threshold is dominated by *_test.go fixtures that legitimately
+      # mirror the parser's accepted literals; excluding goconst on
+      # this single file keeps the noise out without losing signal.
+      - linters:
+          - unparam
+          - goconst
+        path: internal/config/parse\.go
+      # engine_args_known.go is nothing but read-only lookup tables
+      # (OLLAMA_*/--flag -> normalised key). The recurring values
+      # ("num_ctx", "port", "tensor_parallel_size", ...) are canonical
+      # key names that legitimately repeat across the per-engine maps --
+      # e.g. "--tp" and "--tensor-parallel-size" both map to
+      # tensor_parallel_size. Hoisting each into a named constant would
+      # shred the tables for zero readability gain; the recurrence is
+      # the contract. Same rationale as parse.go above.
+      - linters:
+          - goconst
+        path: internal/config/engine_args_known\.go
+      # cmd/llm-init/main.go::run is the bootstrap. Cyclomatic 25
+      # comes from the linear "wire adapter -> source ->
+      # lifecycle -> control plane -> data plane" sequence; each
+      # branch is a different short-circuit (--version,
+      # --print-config, --healthcheck) or a fail-fast init error.
+      # Inline form is what makes the wiring legible at a glance.
+      - linters:
+          - gocyclo
+        path: cmd/llm-init/main\.go
+      # internal/fetch/range.go::Download is the HTTP retry path
+      # with 200/206/416 + retriable-vs-permanent + isize-mismatch
+      # branches all in one place. The branches are documented in
+      # DESIGN sec 6.1.3; collapsing them into helpers loses the
+      # locality that makes the retry contract auditable.
+      - linters:
+          - gocyclo
+        path: internal/fetch/range\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/llm-init/llm-init
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -1,0 +1,20 @@
+# Default to auto-detect text vs binary; commit with LF.
+* text=auto eol=lf
+
+# Shell scripts must always be LF — running them on Linux (the only
+# place they execute) requires it, and shellcheck flags CR with SC1017.
+*.sh text eol=lf
+
+# YAML uses LF universally (helm/k8s tooling chokes on CR).
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Go source — same convention as `gofmt`.
+*.go text eol=lf
+
+# Markdown / docs likewise.
+*.md text eol=lf
+
+# Avoid spurious diffs on Windows for binary assets.
+*.png binary
+*.gz binary

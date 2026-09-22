@@ -1,0 +1,89 @@
+# SGLang-backed deployment. Same shape as deploy/compose/vllm.yml -- see
+# that file for the per-volume rationale.
+#
+# Quickstart:
+#   cp deploy/compose/.env.example .env
+#   docker compose -f deploy/compose/sglang.yml --env-file .env up
+#
+# v1.1.0 contracts:
+#   - Single ENGINE_ARGS env on both containers (cmdline syntax for
+#     SGLang; deploy/wrappers/sglang.sh shell-word-splits and exec's).
+#   - The model-spec is seeded from MODEL_MODE (+ optional MODEL_SUPPORTS)
+#     and persisted at MODEL_SPEC_PATH (default ${RUN_DIR}/model-spec.json);
+#     mount a file + set MODEL_SPEC_PATH to ship a richer spec (below).
+#
+
+name: llm-init-sglang
+
+services:
+  llm-init:
+    image: ${LLM_INIT_IMAGE:-docker.io/beclab/llm-init:v1.2.1}
+    environment:
+      ENGINE_KIND: sglang
+      MODEL_NAME: ${MODEL_NAME}
+      MODEL_MODE: ${MODEL_MODE:-chat}
+      MODEL_SUPPORTS: ${MODEL_SUPPORTS:-}
+      MODEL_SOURCE: ${MODEL_SOURCE}
+      MODEL_SOURCE_LOCAL: ${MODEL_SOURCE_LOCAL:-}
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+      HF_TOKEN: ${HF_TOKEN:-}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # To ship a full capability spec instead of the env-seeded defaults,
+      # mount a file (volumes below) and point MODEL_SPEC_PATH at it:
+      # MODEL_SPEC_PATH: /etc/llm-init/model-spec.json
+    volumes:
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+      - run-state:/run/llm-init
+      # Optional full spec (pair with MODEL_SPEC_PATH above):
+      # - ./model-spec.json:/etc/llm-init/model-spec.json:ro
+    ports:
+      - "${LLM_INIT_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/llm-init", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  sglang:
+    # Pinned to v0.5.11; bump via https://github.com/sgl-project/sglang/releases.
+    # Default tag targets CUDA 13; use SGLANG_IMAGE=lmsysorg/sglang:v0.5.11-cu129-runtime
+    # on CUDA 12 hosts (see deploy/compose/.env.example).
+    image: ${SGLANG_IMAGE:-lmsysorg/sglang:v0.5.11}
+    depends_on:
+      llm-init:
+        condition: service_healthy
+    volumes:
+      - ../wrappers:/llm-init/wrappers:ro
+      - type: ${HF_CACHE_KIND:-volume}
+        source: ${HF_CACHE_SOURCE:-hf-hub-cache}
+        target: /cache/hf/hub
+        read_only: true
+      - run-state:/run/llm-init:ro
+    environment:
+      ENGINE_KIND: sglang
+      MODEL_NAME: ${MODEL_NAME}
+      SGLANG_PORT: ${SGLANG_PORT:-30000}
+      WAIT_TIMEOUT: ${WAIT_TIMEOUT:-3600}
+      ENGINE_ARGS: ${ENGINE_ARGS:-}
+    entrypoint: ["/bin/sh", "/llm-init/wrappers/sglang.sh"]
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-hub-cache:
+  run-state:

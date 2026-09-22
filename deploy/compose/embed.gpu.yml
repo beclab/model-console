@@ -1,0 +1,26 @@
+# Optional overlay for PureEmbed stacks that need host GPU / iGPU access.
+# Not a standalone compose file — CI validates it merged with embed.yml.
+#
+# Usage (merged after embed.yml):
+#   docker compose -f deploy/compose/embed.yml -f deploy/compose/embed.gpu.yml up -d
+#
+# Or via integration test:
+#   EMBED_COMPOSE_GPU=1 bash integration_test_pureembed_unified.sh
+#
+# - NVIDIA: deploy.resources.reservations.devices (set EMBED_GPU_COUNT=0 on CPU-only hosts)
+# - Intel iGPU: /dev/dri bind so OpenVINO can see render nodes
+
+services:
+  embed:
+    # Publish for host-side GET /metrics checks (image has no curl/wget).
+    ports:
+      - "${EMBED_HOST_PORT:-18081}:8080"
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${EMBED_GPU_COUNT:-all}
+              capabilities: [gpu]

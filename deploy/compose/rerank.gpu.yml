@@ -1,0 +1,26 @@
+# Optional overlay for rerank stacks that need host GPU / iGPU access.
+# Not a standalone compose file — CI validates it merged with rerank.yml.
+#
+# Usage (merged after rerank.yml):
+#   docker compose -f deploy/compose/rerank.yml -f deploy/compose/rerank.gpu.yml up -d
+#
+# - NVIDIA: deploy.resources.reservations.devices (set RERANK_GPU_COUNT=0 on CPU-only hosts)
+# - Intel iGPU: /dev/dri bind + group_add so OpenVINO can open render nodes
+
+services:
+  rerank:
+    # Publish for host-side GET /metrics or /v1/gpu_vendor checks.
+    ports:
+      - "${RERANK_HOST_PORT:-18082}:8080"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${VIDEO_GID:-video}"
+      - "${RENDER_GID:-110}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${RERANK_GPU_COUNT:-all}
+              capabilities: [gpu]
