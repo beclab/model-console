@@ -63,6 +63,10 @@ func endpointsFixtureMode(t *testing.T, kind config.EngineKind, mode string, mut
 		env["MODEL_NAME"] = "jevk5"
 		env["MODEL_SOURCE"] = "https://example.com/model.tgz#sha256=" + strings.Repeat("a", 64)
 		env["MODEL_SOURCE_LOCAL"] = "/data/model"
+		env["SYSTEM_ONE_CONTEXT_SIZE"] = "4096"
+		env["SYSTEM_ONE_MAX_CHOICE_OPTIONS"] = "16"
+		env["SYSTEM_ONE_MAX_SCORE_LEVELS"] = "7"
+		env["SYSTEM_ONE_LANGUAGES"] = "en,zh"
 	default:
 		env["MODEL_SOURCE"] = "hf://Qwen/Qwen2.5-7B-Instruct --revision 0123456789abcdef0123456789abcdef01234567"
 	}

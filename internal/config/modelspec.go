@@ -36,7 +36,7 @@ const supportsTTS = "supports_tts"
 // EngineArgs is the model-card SSOT for inference-engine launch flags
 // (same raw string shape as the ENGINE_ARGS env). Parsed Known/Unknown
 // views live on Config.Engine.Args, not on the card. Non-LLM kinds
-// (embed/clipembed/audio/ocr/rerank) require an empty string.
+// (embed/clipembed/audio/ocr/rerank/systemone) require an empty string.
 type ModelSpec struct {
 	Name           string            `json:"name"`
 	Mode           string            `json:"mode"`
@@ -526,6 +526,9 @@ func validateModelSpec(spec ModelSpec, source string) (ModelSpec, error) {
 	if err := validateTTSSpeedExtension(spec.Extensions, source); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateSystemOneExtension(spec, source); err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) > 0 {
 		return ModelSpec{}, joinErrors(errs)
 	}
@@ -544,6 +547,78 @@ func validateModelSpec(spec ModelSpec, source string) (ModelSpec, error) {
 		spec.Supports = map[string]bool{}
 	}
 	return spec, nil
+}
+
+func validateSystemOneExtension(spec ModelSpec, source string) error {
+	value, exists := spec.Extensions["system_one"]
+	if spec.Mode != string(ModelSystemOne) && !exists {
+		return nil
+	}
+	if spec.Mode == string(ModelSystemOne) && spec.ContextSize <= 0 {
+		return fmt.Errorf("model-spec.json (%s): system_one context_size must be > 0", source)
+	}
+	if !exists {
+		return fmt.Errorf("model-spec.json (%s): extensions.system_one is required for mode system_one", source)
+	}
+	extension, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("model-spec.json (%s): extensions.system_one must be an object", source)
+	}
+	for _, limit := range []struct {
+		key      string
+		min, max int
+	}{
+		{key: "max_choice_options", min: 2, max: 255},
+		{key: "max_score_levels", min: 2, max: 10},
+	} {
+		key := limit.key
+		value, ok := extension[key]
+		if !ok {
+			return fmt.Errorf("model-spec.json (%s): extensions.system_one.%s is required", source, key)
+		}
+		number, ok := modelSpecNumber(value)
+		if !ok || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number < float64(limit.min) || number > float64(limit.max) {
+			return fmt.Errorf("model-spec.json (%s): extensions.system_one.%s must be an integer in [%d, %d]", source, key, limit.min, limit.max)
+		}
+	}
+	languagesValue, ok := extension["languages"]
+	if !ok {
+		return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages is required", source)
+	}
+	var languages []string
+	switch values := languagesValue.(type) {
+	case []string:
+		languages = values
+	case []any:
+		languages = make([]string, 0, len(values))
+		for _, value := range values {
+			language, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages must contain only strings", source)
+			}
+			languages = append(languages, language)
+		}
+	default:
+		return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages must be an array", source)
+	}
+	if len(languages) == 0 {
+		return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages must not be empty", source)
+	}
+	seen := map[string]struct{}{}
+	for _, language := range languages {
+		normalized := strings.TrimSpace(language)
+		if normalized == "" || normalized == "*" {
+			return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages entries must be non-empty and cannot be wildcard %q", source, language)
+		}
+		if normalized != language {
+			return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages entry %q must not have surrounding whitespace", source, language)
+		}
+		if _, exists := seen[normalized]; exists {
+			return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages contains duplicate %q", source, language)
+		}
+		seen[normalized] = struct{}{}
+	}
+	return nil
 }
 
 func validateTTSSpeedExtension(extensions map[string]any, source string) error {
