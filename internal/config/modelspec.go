@@ -431,6 +431,11 @@ func NormalizeSpecForEngine(cfg *Config) (bool, error) {
 		slog.Info("model-spec context_size derived from engine_args",
 			"engine", cfg.Engine.Kind, "context_size", cfg.Spec.ContextSize)
 	}
+	if syncMaxOutputTokensFromContext(cfg) {
+		changed = true
+		slog.Info("model-spec max_output_tokens derived from context_size",
+			"context_size", cfg.Spec.ContextSize, "max_output_tokens", cfg.Spec.MaxOutputToks)
+	}
 	warnKVUnifiedOversubscribed(cfg)
 	return changed, nil
 }

@@ -840,6 +840,10 @@ func TestJoinPath(t *testing.T) {
 // as the rest of the data plane (matches OpenAPI components.schemas.Error
 // in the public API). Plain text 502 bodies break OpenAI Python
 // SDK / LangChain that try to JSON-decode the failure.
+//
+// A refused dial is an engine that is not listening -- a card edit's
+// relaunch -- and answers as the readiness gate does: 503 not_ready with
+// Retry-After, since nothing reached the engine.
 func TestProxy_UpstreamErrorJSONEnvelope(t *testing.T) {
 	t.Parallel()
 	// Bind a listener and immediately close it. The free port is then
@@ -865,8 +869,11 @@ func TestProxy_UpstreamErrorJSONEnvelope(t *testing.T) {
 		strings.NewReader(`{"messages":[]}`))
 	a.OpenAIHandler(config.Config{}).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadGateway {
+	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("a refused dial must say when to come back")
 	}
 	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
 		t.Errorf("Content-Type=%q, want application/json", got)
@@ -880,11 +887,39 @@ func TestProxy_UpstreamErrorJSONEnvelope(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 		t.Fatalf("body must be JSON: %v\n%s", err, rec.Body.String())
 	}
-	if env.Error.Code != "upstream_unreachable" {
+	if env.Error.Code != "not_ready" {
 		t.Errorf("error.code=%q", env.Error.Code)
 	}
 	if env.Error.Message == "" {
 		t.Errorf("error.message empty: %s", rec.Body.String())
+	}
+}
+
+// A connection the engine accepted and then dropped may have been partly
+// processed, so it stays a 502 rather than an invitation to resend.
+func TestProxy_DroppedConnectionStaysBadGateway(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer upstream.Close()
+
+	a, err := NewAdapter(config.Config{
+		Engine: config.Engine{URL: upstream.URL},
+		Model:  config.Model{Name: "m"},
+	}, config.EngineVLLM)
+	if err != nil {
+		t.Fatalf("NewAdapter: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"messages":[]}`))
+	a.OpenAIHandler(config.Config{}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "upstream_unreachable") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

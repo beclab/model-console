@@ -107,3 +107,27 @@ func syncContextSizeFromEngineArgs(cfg *Config) bool {
 	cfg.Spec.ContextSize = n
 	return true
 }
+
+// syncMaxOutputTokensFromContext gives a chat card an output ceiling it can
+// actually honor and reports whether it changed.
+//
+// An unset ceiling, or one as large as the window, is read by clients as
+// "reserve the whole window for the reply": Router publishes it as
+// max_output_tokens and a client sizes max_tokens from it, which leaves no
+// room for the prompt and asks the KV pool for a request's worth of tokens
+// nobody will generate. A quarter of the window is what such a card gets
+// instead; a ceiling the author set below the window is theirs and stays.
+func syncMaxOutputTokensFromContext(cfg *Config) bool {
+	if cfg == nil || cfg.Spec.Mode != "chat" || cfg.Spec.ContextSize <= 0 {
+		return false
+	}
+	if cfg.Spec.MaxOutputToks > 0 && cfg.Spec.MaxOutputToks < cfg.Spec.ContextSize {
+		return false
+	}
+	n := cfg.Spec.ContextSize / 4
+	if n < 1 || n == cfg.Spec.MaxOutputToks {
+		return false
+	}
+	cfg.Spec.MaxOutputToks = n
+	return true
+}

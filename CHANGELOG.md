@@ -9,6 +9,21 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Changed
 
+- A chat card whose `max_output_tokens` is unset, or as large as its
+  `context_size`, now gets a quarter of the window, derived at boot and on
+  `PUT /api/model-spec` alongside `context_size`. Router publishes the value
+  and clients size `max_tokens` from it; a card reporting its whole window
+  (131072 of 131072) had clients reserving the entire context for the reply,
+  which the KV budget refused as `kv_budget_exhausted`. A ceiling the author
+  set below the window is kept.
+
+- A request the engine refuses to accept — nothing listening, which is what
+  a card edit's relaunch looks like until the next health probe — is now
+  503 `not_ready` with `Retry-After: 5`, the same answer the readiness gate
+  gives, instead of 502 `upstream_unreachable`. Nothing reached the engine,
+  so resending is safe; a connection the engine accepted and then dropped is
+  still 502.
+
 - `MODEL_MODE=music_generation` no longer trims `/v1` paths. It joins
   `chat`, `audio`, `tts` and `translate` as a pass-through mode, so a music
   engine can answer subresources under a generation that this repository

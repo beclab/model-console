@@ -177,3 +177,27 @@ func TestSyncContextSizeFromEngineArgs_KeepsValueWhenFlagsSaySilent(t *testing.T
 		t.Errorf("ContextSize = %d, want the stored 32768", cfg.Spec.ContextSize)
 	}
 }
+
+func TestSyncMaxOutputTokensFromContext(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mode         string
+		context, max int
+		want         int
+		wantChanged  bool
+	}{
+		{"unset gets a quarter of the window", "chat", 131072, 0, 32768, true},
+		{"the whole window gets a quarter of it", "chat", 131072, 131072, 32768, true},
+		{"an authored ceiling below the window stays", "chat", 131072, 8192, 8192, false},
+		{"no window, nothing to derive from", "chat", 0, 0, 0, false},
+		{"embedding cards have no reply to size", "embedding", 8192, 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{Spec: ModelSpec{Name: "m", Mode: tc.mode, ContextSize: tc.context, MaxOutputToks: tc.max}}
+			changed := syncMaxOutputTokensFromContext(cfg)
+			if changed != tc.wantChanged || cfg.Spec.MaxOutputToks != tc.want {
+				t.Fatalf("changed=%v max=%d, want %v %d", changed, cfg.Spec.MaxOutputToks, tc.wantChanged, tc.want)
+			}
+		})
+	}
+}
