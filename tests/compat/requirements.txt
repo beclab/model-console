@@ -6,7 +6,7 @@
 # Pinning constraints across the langchain stack:
 #   * langchain-openai 1.1.x requires `openai>=2.26.0,<3.0.0`. The
 #     pre-v1.0.6 file pinned openai==1.51.2 alongside
-#     langchain-openai==1.2.1, which yields ResolutionImpossible.
+#     langchain-openai==1.6.2, which yields ResolutionImpossible.
 #     Caught at v1.0.5 tag-cut; fix was to bump openai to 2.x.
 #   * Pinning openai exactly (rather than `>=2.26.0`) keeps the suite
 #     reproducible: a Dependabot PR that bumps either langchain-openai
@@ -16,7 +16,7 @@
 #     this file, so the dependency-conflict failure mode is now PR-
 #     visible.
 pytest==9.0.3
-openai==2.37.0
-langchain-openai==1.2.1
-langchain-core==1.4.0
+openai==3.16.2
+langchain-openai==1.6.2
+langchain-core==1.6.3
 httpx==0.28.1
