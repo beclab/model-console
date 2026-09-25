@@ -18,6 +18,7 @@ func TestDeriveEngineURL(t *testing.T) {
 		EngineOCR:       "http://ocradapter:8080",
 		EngineRerank:    "http://rerank:8080",
 		EngineMusic:     "http://music-engine:8001",
+		EngineSystemOne: "http://systemone:8000",
 	}
 	for kind, want := range cases {
 		if got := deriveEngineURL(kind); got != want {

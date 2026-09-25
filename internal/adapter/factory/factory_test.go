@@ -43,6 +43,7 @@ func TestNew_ProxyKinds(t *testing.T) {
 	for _, k := range []config.EngineKind{
 		config.EngineVLLM, config.EngineLlamaCpp, config.EngineSGLang,
 		config.EngineEmbed, config.EngineClipEmbed, config.EngineOCR, config.EngineRerank,
+		config.EngineSystemOne,
 	} {
 		k := k
 		t.Run(string(k), func(t *testing.T) {

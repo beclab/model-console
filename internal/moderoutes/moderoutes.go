@@ -60,6 +60,7 @@ const (
 	PathModels           = "/v1/models"
 	PathEmbeddings       = "/v1/embeddings"
 	PathRerank           = "/v1/rerank"
+	PathSystemOne        = "/v1/systemone"
 	PathOCR              = "/v1/ocr"
 	PathOCRQueue         = "/v1/ocr/queue"
 	PathOCRJob           = "/v1/ocr/jobs/{id}"
@@ -83,6 +84,10 @@ var declared = map[config.ModelType][]Route{
 	config.ModelRerank: {
 		{http.MethodGet, PathModels},
 		{http.MethodPost, PathRerank},
+	},
+	config.ModelSystemOne: {
+		{http.MethodGet, PathModels},
+		{http.MethodPost, PathSystemOne},
 	},
 	config.ModelOCR: {
 		{http.MethodGet, PathModels},

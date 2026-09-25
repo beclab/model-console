@@ -491,13 +491,13 @@ func ParseModelSpecBytes(data []byte, source string) (ModelSpec, error) {
 func validateModelSpec(spec ModelSpec, source string) (ModelSpec, error) {
 	var errs []error
 	if spec.Mode == "" {
-		errs = append(errs, fmt.Errorf("model-spec.json (%s): mode is required (chat | embedding | audio | tts | ocr | rerank | translate | music_generation)", source))
+		errs = append(errs, fmt.Errorf("model-spec.json (%s): mode is required (chat | embedding | audio | tts | ocr | rerank | translate | music_generation | system_one)", source))
 	} else if spec.Mode != string(ModelChat) && spec.Mode != string(ModelEmbedding) &&
 		spec.Mode != string(ModelAudio) && spec.Mode != string(ModelTTS) &&
 		spec.Mode != string(ModelOCR) && spec.Mode != string(ModelRerank) && spec.Mode != string(ModelTranslate) &&
-		spec.Mode != string(ModelMusicGeneration) {
+		spec.Mode != string(ModelMusicGeneration) && spec.Mode != string(ModelSystemOne) {
 		errs = append(errs, fmt.Errorf(
-			"model-spec.json (%s): mode %q must be \"chat\", \"embedding\", \"audio\", \"tts\", \"ocr\", \"rerank\", \"translate\" or \"music_generation\"",
+			"model-spec.json (%s): mode %q must be \"chat\", \"embedding\", \"audio\", \"tts\", \"ocr\", \"rerank\", \"translate\", \"music_generation\" or \"system_one\"",
 			source, spec.Mode))
 	}
 	if spec.ContextSize < 0 {

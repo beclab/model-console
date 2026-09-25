@@ -42,6 +42,17 @@ func TestLoadModelSpecFile_Minimal(t *testing.T) {
 	}
 }
 
+func TestLoadModelSpecFile_ModeSystemOne(t *testing.T) {
+	t.Parallel()
+	spec, err := LoadModelSpecFile(writeSpec(t, `{"name":"jevk5","mode":"system_one"}`))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if spec.Mode != "system_one" || spec.Name != "jevk5" {
+		t.Errorf("Name/Mode = %q/%q, want jevk5/system_one", spec.Name, spec.Mode)
+	}
+}
+
 func TestLoadModelSpecFile_FullPayload(t *testing.T) {
 	t.Parallel()
 	body := `{

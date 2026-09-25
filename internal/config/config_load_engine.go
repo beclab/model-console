@@ -64,6 +64,7 @@ const (
 	// OCRAdapter (not llamacpp): proxy Ready probes GET /v1/models here.
 	defaultOCRAdapterURL = "http://ocradapter:8080"
 	defaultRerankURL     = "http://rerank:8080"
+	defaultSystemOneURL  = "http://systemone:8000"
 )
 
 // deriveEngineURL returns the conventional sibling-engine URL for a
@@ -91,6 +92,8 @@ func deriveEngineURL(kind EngineKind) string {
 		return defaultRerankURL
 	case EngineMusic:
 		return defaultMusicURL
+	case EngineSystemOne:
+		return defaultSystemOneURL
 	}
 	return ""
 }

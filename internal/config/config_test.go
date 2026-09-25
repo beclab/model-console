@@ -269,6 +269,31 @@ func TestLoad_RerankKindAccepted(t *testing.T) {
 	}
 }
 
+func TestLoad_SystemOneKindAccepted(t *testing.T) {
+	cfg, err := Load(mapEnv(map[string]string{
+		"ENGINE_KIND":        "systemone",
+		"MODEL_NAME":         "jevk5",
+		"MODEL_MODE":         "system_one",
+		"MODEL_SOURCE":       "https://example.com/model.tgz#sha256=" + strings.Repeat("a", 64),
+		"MODEL_SOURCE_LOCAL": "/data/model",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Engine.Kind != EngineSystemOne {
+		t.Errorf("Kind = %q, want systemone", cfg.Engine.Kind)
+	}
+	if cfg.Model.Type != ModelSystemOne || cfg.Spec.Mode != "system_one" {
+		t.Errorf("Model.Type/Spec.Mode = %q / %q, want system_one", cfg.Model.Type, cfg.Spec.Mode)
+	}
+	if cfg.Engine.URL != "http://systemone:8000" {
+		t.Errorf("URL = %q, want http://systemone:8000", cfg.Engine.URL)
+	}
+	if len(cfg.Engine.Args.Known) != 0 || cfg.Engine.Args.Raw != "" {
+		t.Errorf("Engine.Args should be empty for systemone, got %+v", cfg.Engine.Args)
+	}
+}
+
 func TestLoad_MusicKindAccepted(t *testing.T) {
 	cfg, err := Load(mapEnv(map[string]string{
 		"ENGINE_KIND":  "music",

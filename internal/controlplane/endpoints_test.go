@@ -58,6 +58,11 @@ func endpointsFixtureMode(t *testing.T, kind config.EngineKind, mode string, mut
 	case config.EngineMusic:
 		env["MODEL_MODE"] = "music_generation"
 		env["MODEL_SOURCE"] = "hf://ACE-Step/acestep-v15-xl-turbo"
+	case config.EngineSystemOne:
+		env["MODEL_MODE"] = "system_one"
+		env["MODEL_NAME"] = "jevk5"
+		env["MODEL_SOURCE"] = "https://example.com/model.tgz#sha256=" + strings.Repeat("a", 64)
+		env["MODEL_SOURCE_LOCAL"] = "/data/model"
 	default:
 		env["MODEL_SOURCE"] = "hf://Qwen/Qwen2.5-7B-Instruct --revision 0123456789abcdef0123456789abcdef01234567"
 	}
@@ -447,6 +452,20 @@ func TestEndpoints_RerankModeCatalogSoftFilter(t *testing.T) {
 	assertAvail(t, list, mPOST, pathOCR, false)
 }
 
+func TestEndpoints_SystemOneModeCatalogSoftFilter(t *testing.T) {
+	t.Parallel()
+	s := endpointsFixture(t, config.EngineSystemOne, func(o *Options) {
+		o.DataPlane = func(_ *http.ServeMux) {}
+	})
+	list := parseEndpoints(t, get(t, s, "/api/endpoints").Body)
+
+	assertAvail(t, list, mGET, pathModels, true)
+	assertAvail(t, list, mPOST, pathSystemOne, true)
+	assertAvail(t, list, mPOST, pathChatCompletions, false)
+	assertAvail(t, list, mPOST, pathEmbeddings, false)
+	assertAvail(t, list, mPOST, pathRerank, false)
+}
+
 func TestEndpoints_OCRModeCatalogSoftFilter(t *testing.T) {
 	t.Parallel()
 	s := endpointsFixture(t, config.EngineOCR, func(o *Options) {
@@ -606,6 +625,7 @@ func TestEndpoints_CatalogIsTheModeRouteTable(t *testing.T) {
 		{config.EngineEmbed, config.ModelEmbedding},
 		{config.EngineRerank, config.ModelRerank},
 		{config.EngineOCR, config.ModelOCR},
+		{config.EngineSystemOne, config.ModelSystemOne},
 	} {
 		s := endpointsFixture(t, tc.kind, func(o *Options) {
 			o.DataPlane = func(_ *http.ServeMux) {}

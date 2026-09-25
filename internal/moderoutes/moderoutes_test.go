@@ -31,7 +31,7 @@ func TestDeclaredRowsAreAlsoServedPaths(t *testing.T) {
 
 func TestRestricted(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []config.ModelType{config.ModelEmbedding, config.ModelRerank, config.ModelOCR} {
+	for _, mode := range []config.ModelType{config.ModelEmbedding, config.ModelRerank, config.ModelOCR, config.ModelSystemOne} {
 		if !Restricted(mode) {
 			t.Errorf("mode=%s should have a declared route set", mode)
 		}
@@ -123,6 +123,21 @@ func TestServesPath_RerankMode(t *testing.T) {
 	}
 	if ServesPath(config.ModelRerank, "/v1/chat/completions") {
 		t.Error("rerank must not serve chat")
+	}
+}
+
+func TestServesPath_SystemOneMode(t *testing.T) {
+	t.Parallel()
+	if !ServesPath(config.ModelSystemOne, PathSystemOne) {
+		t.Error("system_one should serve /v1/systemone")
+	}
+	if !ServesPath(config.ModelSystemOne, PathModels) {
+		t.Error("system_one should serve /v1/models")
+	}
+	for _, path := range []string{"/v1/chat/completions", PathEmbeddings, PathRerank} {
+		if ServesPath(config.ModelSystemOne, path) {
+			t.Errorf("system_one must not serve %s", path)
+		}
 	}
 }
 

@@ -36,7 +36,7 @@ func New(cfg config.Config, metrics *obs.Metrics) (adapter.Adapter, error) {
 		return nullengine.New(), nil
 	case config.EngineOllama:
 		return ollama.NewAdapter(cfg), nil
-	case config.EngineVLLM, config.EngineLlamaCpp, config.EngineSGLang, config.EngineEmbed, config.EngineClipEmbed, config.EngineAudio, config.EngineOCR, config.EngineRerank, config.EngineMusic:
+	case config.EngineVLLM, config.EngineLlamaCpp, config.EngineSGLang, config.EngineEmbed, config.EngineClipEmbed, config.EngineAudio, config.EngineOCR, config.EngineRerank, config.EngineMusic, config.EngineSystemOne:
 		a, err := proxy.NewAdapter(cfg, cfg.Engine.Kind)
 		if err != nil {
 			return nil, err

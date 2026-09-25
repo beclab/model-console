@@ -18,6 +18,7 @@ const (
 	EngineOCR       EngineKind = "ocr"
 	EngineRerank    EngineKind = "rerank"
 	EngineMusic     EngineKind = "music"
+	EngineSystemOne EngineKind = "systemone"
 )
 
 // AllEngineKinds lists every supported engine; used for env validation.
@@ -32,6 +33,7 @@ var AllEngineKinds = []string{
 	string(EngineOCR),
 	string(EngineRerank),
 	string(EngineMusic),
+	string(EngineSystemOne),
 }
 
 // SourceKind enumerates how llm-init obtains the model bytes. The four
@@ -76,6 +78,7 @@ const (
 	ModelRerank          ModelType = "rerank"
 	ModelTranslate       ModelType = "translate"
 	ModelMusicGeneration ModelType = "music_generation"
+	ModelSystemOne       ModelType = "system_one"
 )
 
 // Defaults applied when the corresponding env is unset.
@@ -154,7 +157,7 @@ const (
 // the named constants above so a one-line edit to the constant
 // rotates the entire enum.
 var (
-	allowedModelType     = []string{string(ModelChat), string(ModelEmbedding), string(ModelAudio), string(ModelTTS), string(ModelOCR), string(ModelRerank), string(ModelTranslate), string(ModelMusicGeneration)}
+	allowedModelType     = []string{string(ModelChat), string(ModelEmbedding), string(ModelAudio), string(ModelTTS), string(ModelOCR), string(ModelRerank), string(ModelTranslate), string(ModelMusicGeneration), string(ModelSystemOne)}
 	allowedVerifyLevel   = []string{"size", "sha256"}
 	allowedVerifyOnDrift = []string{VerifyOnDriftReport, VerifyOnDriftFollow}
 	allowedLogLevel      = []string{LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError}
