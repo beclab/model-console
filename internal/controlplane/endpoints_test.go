@@ -67,6 +67,7 @@ func endpointsFixtureMode(t *testing.T, kind config.EngineKind, mode string, mut
 		env["SYSTEM_ONE_MAX_CHOICE_OPTIONS"] = "16"
 		env["SYSTEM_ONE_MAX_SCORE_LEVELS"] = "7"
 		env["SYSTEM_ONE_LANGUAGES"] = "en,zh"
+		env["SYSTEM_ONE_DEFAULT_ELIGIBLE"] = "true"
 	default:
 		env["MODEL_SOURCE"] = "hf://Qwen/Qwen2.5-7B-Instruct --revision 0123456789abcdef0123456789abcdef01234567"
 	}

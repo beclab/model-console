@@ -564,6 +564,9 @@ func validateSystemOneExtension(spec ModelSpec, source string) error {
 	if !ok {
 		return fmt.Errorf("model-spec.json (%s): extensions.system_one must be an object", source)
 	}
+	if _, ok := extension["default_eligible"].(bool); !ok {
+		return fmt.Errorf("model-spec.json (%s): extensions.system_one.default_eligible must be a boolean", source)
+	}
 	for _, limit := range []struct {
 		key      string
 		min, max int

@@ -129,6 +129,7 @@ func (l *loader) loadSpec() {
 				"max_choice_options": limits.maxChoiceOptions,
 				"max_score_levels":   limits.maxScoreLevels,
 				"languages":          limits.languages,
+				"default_eligible":   limits.defaultEligible,
 			}
 		}
 	}
@@ -171,6 +172,7 @@ const (
 	systemOneMaxChoiceOptionsEnv = "SYSTEM_ONE_MAX_CHOICE_OPTIONS"
 	systemOneMaxScoreLevelsEnv   = "SYSTEM_ONE_MAX_SCORE_LEVELS"
 	systemOneLanguagesEnv        = "SYSTEM_ONE_LANGUAGES"
+	systemOneDefaultEligibleEnv  = "SYSTEM_ONE_DEFAULT_ELIGIBLE"
 )
 
 type systemOneSeedLimits struct {
@@ -178,6 +180,7 @@ type systemOneSeedLimits struct {
 	maxChoiceOptions int
 	maxScoreLevels   int
 	languages        []string
+	defaultEligible  bool
 }
 
 func seedSystemOneLimitsFromEnv(g Getenv) (systemOneSeedLimits, error) {
@@ -216,6 +219,14 @@ func seedSystemOneLimitsFromEnv(g Getenv) (systemOneSeedLimits, error) {
 	if err != nil {
 		return systemOneSeedLimits{}, err
 	}
+	defaultEligibleRaw, err := required(systemOneDefaultEligibleEnv)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	defaultEligible, err := parseBool(systemOneDefaultEligibleEnv, defaultEligibleRaw, false)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
 	seen := map[string]struct{}{}
 	languages := make([]string, 0)
 	for _, raw := range strings.Split(languagesRaw, ",") {
@@ -238,6 +249,7 @@ func seedSystemOneLimitsFromEnv(g Getenv) (systemOneSeedLimits, error) {
 		maxChoiceOptions: maxChoiceOptions,
 		maxScoreLevels:   maxScoreLevels,
 		languages:        languages,
+		defaultEligible:  defaultEligible,
 	}, nil
 }
 

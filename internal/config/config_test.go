@@ -281,6 +281,7 @@ func TestLoad_SystemOneKindAccepted(t *testing.T) {
 		"SYSTEM_ONE_MAX_CHOICE_OPTIONS": "16",
 		"SYSTEM_ONE_MAX_SCORE_LEVELS":   "7",
 		"SYSTEM_ONE_LANGUAGES":          "en, zh, en",
+		"SYSTEM_ONE_DEFAULT_ELIGIBLE":   "true",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
