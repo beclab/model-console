@@ -118,7 +118,7 @@ func syncContextSizeFromEngineArgs(cfg *Config) bool {
 // nobody will generate. A quarter of the window is what such a card gets
 // instead; a ceiling the author set below the window is theirs and stays.
 func syncMaxOutputTokensFromContext(cfg *Config) bool {
-	if cfg == nil || cfg.Spec.Mode != "chat" || cfg.Spec.ContextSize <= 0 {
+	if cfg == nil || cfg.Spec.Mode != string(ModelChat) || cfg.Spec.ContextSize <= 0 {
 		return false
 	}
 	if cfg.Spec.MaxOutputToks > 0 && cfg.Spec.MaxOutputToks < cfg.Spec.ContextSize {
