@@ -68,7 +68,7 @@ func writeRestartHeaders(w http.ResponseWriter, outcome string, r handoff.Receip
 		h.Set(headerRestartGeneration, r.Generation)
 	}
 	if outcome == restartSignaled && r.Supervision == handoff.SupervisionConfirmed {
-		h.Set(headerRestarted, "true")
+		h.Set(headerRestarted, boolTrue)
 	}
 }
 

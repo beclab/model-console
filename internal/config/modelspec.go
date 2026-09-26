@@ -567,6 +567,13 @@ func validateSystemOneExtension(spec ModelSpec, source string) error {
 	if _, ok := extension["default_eligible"].(bool); !ok {
 		return fmt.Errorf("model-spec.json (%s): extensions.system_one.default_eligible must be a boolean", source)
 	}
+	if err := validateSystemOneLimits(extension, source); err != nil {
+		return err
+	}
+	return validateSystemOneLanguages(extension, source)
+}
+
+func validateSystemOneLimits(extension map[string]any, source string) error {
 	for _, limit := range []struct {
 		key      string
 		min, max int
@@ -584,6 +591,10 @@ func validateSystemOneExtension(spec ModelSpec, source string) error {
 			return fmt.Errorf("model-spec.json (%s): extensions.system_one.%s must be an integer in [%d, %d]", source, key, limit.min, limit.max)
 		}
 	}
+	return nil
+}
+
+func validateSystemOneLanguages(extension map[string]any, source string) error {
 	languagesValue, ok := extension["languages"]
 	if !ok {
 		return fmt.Errorf("model-spec.json (%s): extensions.system_one.languages is required", source)
