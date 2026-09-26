@@ -42,6 +42,35 @@ func TestLoadModelSpecFile_Minimal(t *testing.T) {
 	}
 }
 
+func TestLoadModelSpecFile_ModeSystemOne(t *testing.T) {
+	t.Parallel()
+	spec, err := LoadModelSpecFile(writeSpec(t, `{
+		"name":"jevk5","mode":"system_one","context_size":4096,
+		"extensions":{"system_one":{"max_choice_options":16,"max_score_levels":7,"languages":["en","zh"],"default_eligible":true}}
+	}`))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if spec.Mode != "system_one" || spec.Name != "jevk5" {
+		t.Errorf("Name/Mode = %q/%q, want jevk5/system_one", spec.Name, spec.Mode)
+	}
+}
+
+func TestLoadModelSpecFile_RejectsInvalidSystemOneLimits(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		`{"name":"jevk5","mode":"system_one"}`,
+		`{"name":"jevk5","mode":"system_one","context_size":4096,"extensions":{"system_one":{"max_choice_options":1,"max_score_levels":7,"languages":["en"],"default_eligible":true}}}`,
+		`{"name":"jevk5","mode":"system_one","context_size":4096,"extensions":{"system_one":{"max_choice_options":16,"max_score_levels":11,"languages":["en"],"default_eligible":true}}}`,
+		`{"name":"jevk5","mode":"system_one","context_size":4096,"extensions":{"system_one":{"max_choice_options":16,"max_score_levels":7,"languages":["*"],"default_eligible":true}}}`,
+	}
+	for _, body := range cases {
+		if _, err := LoadModelSpecFile(writeSpec(t, body)); err == nil || !strings.Contains(err.Error(), "system_one") {
+			t.Fatalf("body %s: err = %v", body, err)
+		}
+	}
+}
+
 func TestLoadModelSpecFile_FullPayload(t *testing.T) {
 	t.Parallel()
 	body := `{

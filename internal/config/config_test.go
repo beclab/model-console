@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -266,6 +267,56 @@ func TestLoad_RerankKindAccepted(t *testing.T) {
 	}
 	if len(cfg.Engine.Args.Known) != 0 || cfg.Engine.Args.Raw != "" {
 		t.Errorf("Engine.Args should be empty for rerank, got %+v", cfg.Engine.Args)
+	}
+}
+
+func TestLoad_SystemOneKindAccepted(t *testing.T) {
+	cfg, err := Load(mapEnv(map[string]string{
+		"ENGINE_KIND":                   "systemone",
+		"MODEL_NAME":                    "jevk5",
+		"MODEL_MODE":                    "system_one",
+		"MODEL_SOURCE":                  "https://example.com/model.tgz#sha256=" + strings.Repeat("a", 64),
+		"MODEL_SOURCE_LOCAL":            "/data/model",
+		"SYSTEM_ONE_CONTEXT_SIZE":       "4096",
+		"SYSTEM_ONE_MAX_CHOICE_OPTIONS": "16",
+		"SYSTEM_ONE_MAX_SCORE_LEVELS":   "7",
+		"SYSTEM_ONE_LANGUAGES":          "en, zh, en",
+		"SYSTEM_ONE_DEFAULT_ELIGIBLE":   "true",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Engine.Kind != EngineSystemOne {
+		t.Errorf("Kind = %q, want systemone", cfg.Engine.Kind)
+	}
+	if cfg.Model.Type != ModelSystemOne || cfg.Spec.Mode != "system_one" {
+		t.Errorf("Model.Type/Spec.Mode = %q / %q, want system_one", cfg.Model.Type, cfg.Spec.Mode)
+	}
+	if cfg.Engine.URL != "http://systemone:8000" {
+		t.Errorf("URL = %q, want http://systemone:8000", cfg.Engine.URL)
+	}
+	if len(cfg.Engine.Args.Known) != 0 || cfg.Engine.Args.Raw != "" {
+		t.Errorf("Engine.Args should be empty for systemone, got %+v", cfg.Engine.Args)
+	}
+	if cfg.Spec.ContextSize != 4096 {
+		t.Errorf("ContextSize = %d, want 4096", cfg.Spec.ContextSize)
+	}
+	extension := cfg.Spec.Extensions["system_one"].(map[string]any)
+	if got := extension["languages"]; !reflect.DeepEqual(got, []string{"en", "zh"}) {
+		t.Errorf("languages = %#v, want [en zh]", got)
+	}
+}
+
+func TestLoad_SystemOneRequiresCapacityDeclaration(t *testing.T) {
+	_, err := Load(mapEnv(map[string]string{
+		"ENGINE_KIND":        "systemone",
+		"MODEL_NAME":         "jevk5",
+		"MODEL_MODE":         "system_one",
+		"MODEL_SOURCE":       "https://example.com/model.tgz#sha256=" + strings.Repeat("a", 64),
+		"MODEL_SOURCE_LOCAL": "/data/model",
+	}))
+	if err == nil || !strings.Contains(err.Error(), systemOneContextSizeEnv) {
+		t.Fatalf("err = %v, want missing System One capacity error", err)
 	}
 }
 

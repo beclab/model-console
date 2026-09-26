@@ -121,6 +121,38 @@ func TestModeGuard_RerankRefusesChatAndKeepsRerank(t *testing.T) {
 	}
 }
 
+func TestModeGuard_SystemOneOnlyServesTypedDecisionSurface(t *testing.T) {
+	t.Parallel()
+	fa := &fakeAdapter{}
+	mux := newModeMux(t, config.ModelSystemOne, func() bool { return true }, fa)
+
+	for _, path := range []string{
+		"/v1/chat/completions",
+		"/v1/embeddings",
+		"/v1/rerank",
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s: status=%d, want 404", path, rec.Code)
+		}
+	}
+	if fa.calls.Load() != 0 {
+		t.Errorf("engine was handed %d request(s) it has no route for", fa.calls.Load())
+	}
+
+	for _, r := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/systemone"},
+		{http.MethodGet, "/v1/models"},
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(r.method, r.path, strings.NewReader(`{}`)))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s %s: status=%d, want 200; body=%s", r.method, r.path, rec.Code, rec.Body)
+		}
+	}
+}
+
 // A path this application will never serve says so while the model is
 // still downloading too. 503 + Retry-After there would have a client
 // wait for something that is not coming.

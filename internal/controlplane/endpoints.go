@@ -116,6 +116,7 @@ const (
 	pathModels           = moderoutes.PathModels
 	pathEmbeddings       = moderoutes.PathEmbeddings
 	pathRerank           = moderoutes.PathRerank
+	pathSystemOne        = moderoutes.PathSystemOne
 	pathOCR              = moderoutes.PathOCR
 	pathOCRQueue         = moderoutes.PathOCRQueue
 	pathOCRJob           = moderoutes.PathOCRJob
@@ -298,6 +299,11 @@ func (s *Server) buildEndpointCatalog() []EndpointInfo {
 			Description: "Rerank documents (catalog highlight when MODEL_MODE=rerank).",
 			Available:   dataPlaneOn, Reasons: unlessOn(dataPlaneOn, dataPlaneReason),
 			CurlHint: `curl -sS -X POST http://HOST:PORT/v1/rerank -H 'content-type: application/json' -d '{"query":"what is panda?","documents":["hi","panda is a mammal"]}'`},
+		{Method: mPOST, Path: pathSystemOne, Category: categoryOpenAI,
+			Group:       groupOpenAI,
+			Description: "TypeSafe-compatible typed decision request (MODEL_MODE=system_one).",
+			Available:   dataPlaneOn, Reasons: unlessOn(dataPlaneOn, dataPlaneReason),
+			CurlHint: `curl -sS -X POST http://HOST:PORT/v1/systemone -H 'content-type: application/json' -d '{"model":"MODEL_NAME","state":"A duplicate charge was reported.","questions":{"team":{"type":"choice","instructions":"Choose the owner.","criteria":{"billing":"Payments and refunds","technical":"Bugs"}}}}'`},
 		{Method: mGET, Path: pathModels, Category: categoryOpenAI,
 			Group:       groupOpenAI,
 			Description: "Lists this instance's MODEL_NAME (single-entry list).",
@@ -556,6 +562,7 @@ var dataPlaneOwners = map[string]config.ModelType{
 	pathMessages:        config.ModelChat,
 	pathEmbeddings:      config.ModelEmbedding,
 	pathRerank:          config.ModelRerank,
+	pathSystemOne:       config.ModelSystemOne,
 	pathOCR:             config.ModelOCR,
 	pathOCRQueue:        config.ModelOCR,
 	pathOCRJob:          config.ModelOCR,

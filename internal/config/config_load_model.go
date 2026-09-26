@@ -115,6 +115,25 @@ func (l *loader) loadSpec() {
 		}
 	}
 
+	contextSize := 0
+	if mode == string(ModelSystemOne) {
+		limits, err := seedSystemOneLimitsFromEnv(l.g)
+		if err != nil {
+			l.collect(err)
+		} else {
+			contextSize = limits.contextSize
+			if extensions == nil {
+				extensions = map[string]any{}
+			}
+			extensions["system_one"] = map[string]any{
+				"max_choice_options": limits.maxChoiceOptions,
+				"max_score_levels":   limits.maxScoreLevels,
+				"languages":          limits.languages,
+				"default_eligible":   limits.defaultEligible,
+			}
+		}
+	}
+
 	// Seed parameter_rules with the reasoning ladder the chart declared.
 	// Which levels exist is a joint fact of the model and the engine that
 	// only this side knows, and Router projects it rather than inventing
@@ -133,6 +152,7 @@ func (l *loader) loadSpec() {
 		Supports:       supports,
 		ParameterRules: rules,
 		EngineArgs:     strings.TrimSpace(l.g("ENGINE_ARGS")),
+		ContextSize:    contextSize,
 		Extensions:     extensions,
 	}, "env (MODEL_MODE / MODEL_SUPPORTS)")
 	if err != nil {
@@ -145,6 +165,92 @@ func (l *loader) loadSpec() {
 	if err := ApplyEngineArgsFromSpec(&l.c); err != nil {
 		l.collect(err)
 	}
+}
+
+const (
+	systemOneContextSizeEnv      = "SYSTEM_ONE_CONTEXT_SIZE"
+	systemOneMaxChoiceOptionsEnv = "SYSTEM_ONE_MAX_CHOICE_OPTIONS"
+	systemOneMaxScoreLevelsEnv   = "SYSTEM_ONE_MAX_SCORE_LEVELS"
+	systemOneLanguagesEnv        = "SYSTEM_ONE_LANGUAGES"
+	systemOneDefaultEligibleEnv  = "SYSTEM_ONE_DEFAULT_ELIGIBLE"
+)
+
+type systemOneSeedLimits struct {
+	contextSize      int
+	maxChoiceOptions int
+	maxScoreLevels   int
+	languages        []string
+	defaultEligible  bool
+}
+
+func seedSystemOneLimitsFromEnv(g Getenv) (systemOneSeedLimits, error) {
+	required := func(key string) (string, error) { return requireString(g, key) }
+	contextRaw, err := required(systemOneContextSizeEnv)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	contextSize, err := parseInt(systemOneContextSizeEnv, contextRaw, 0)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	if contextSize <= 0 {
+		return systemOneSeedLimits{}, fmt.Errorf("%s: %d must be > 0", systemOneContextSizeEnv, contextSize)
+	}
+
+	choiceRaw, err := required(systemOneMaxChoiceOptionsEnv)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	maxChoiceOptions, err := parseIntInRange(systemOneMaxChoiceOptionsEnv, choiceRaw, 0, 2, 255)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+
+	scoreRaw, err := required(systemOneMaxScoreLevelsEnv)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	maxScoreLevels, err := parseIntInRange(systemOneMaxScoreLevelsEnv, scoreRaw, 0, 2, 10)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+
+	languagesRaw, err := required(systemOneLanguagesEnv)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	defaultEligibleRaw, err := required(systemOneDefaultEligibleEnv)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	defaultEligible, err := parseBool(systemOneDefaultEligibleEnv, defaultEligibleRaw, false)
+	if err != nil {
+		return systemOneSeedLimits{}, err
+	}
+	seen := map[string]struct{}{}
+	languages := make([]string, 0)
+	for _, raw := range strings.Split(languagesRaw, ",") {
+		language := strings.TrimSpace(raw)
+		if language == "" {
+			return systemOneSeedLimits{}, fmt.Errorf("%s: languages must be non-empty comma-separated values", systemOneLanguagesEnv)
+		}
+		if language == "*" {
+			return systemOneSeedLimits{}, fmt.Errorf("%s: wildcard language %q is not allowed", systemOneLanguagesEnv, language)
+		}
+		if _, ok := seen[language]; ok {
+			continue
+		}
+		seen[language] = struct{}{}
+		languages = append(languages, language)
+	}
+
+	return systemOneSeedLimits{
+		contextSize:      contextSize,
+		maxChoiceOptions: maxChoiceOptions,
+		maxScoreLevels:   maxScoreLevels,
+		languages:        languages,
+		defaultEligible:  defaultEligible,
+	}, nil
 }
 
 const (

@@ -31,6 +31,7 @@ const (
 	// two packages don't share a constant module.
 	statusReady    = "ready"
 	statusNotReady = "not_ready"
+	boolTrue       = "true"
 )
 
 // errorBody is the unified error envelope.
@@ -185,7 +186,7 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 	// there, and rejecting it here would 400 dashboards still sending
 	// the pre-v1.1.0 query.
 	opts := RetryOptions{
-		Force: q.Get("force") == "true",
+		Force: q.Get("force") == boolTrue,
 		Level: q.Get("level"),
 	}
 	previous := s.opts.Manager.Snapshot().Phase

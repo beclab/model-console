@@ -25,7 +25,7 @@ import (
 // As of v1.1.0 the user-facing env surface is:
 //   - ENGINE_KIND + ENGINE_ARGS (single env, parsed per Kind)
 //   - MODEL_NAME
-//   - MODEL_MODE (chat | embedding | audio | tts | translate | ocr | rerank) + MODEL_SUPPORTS (CSV of enabled
+//   - MODEL_MODE (chat | embedding | audio | tts | translate | ocr | rerank | music_generation | system_one) + MODEL_SUPPORTS (CSV of enabled
 //     supports_* keys) — seed the model-spec identity
 //   - MODEL_SOURCE
 //   - MODEL_SOURCE_LOCAL (only for https?://)
