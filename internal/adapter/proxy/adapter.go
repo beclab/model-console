@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -88,11 +89,43 @@ func NewAdapter(cfg config.Config, kind config.EngineKind) (*Adapter, error) {
 // internal/dataplane/notready.go and internal/controlplane/handlers.go).
 func writeUpstreamError(w http.ResponseWriter, _ *http.Request, err error) {
 	w.Header().Set(headerContentType, contentTypeJSON)
+	if engineRefusedDial(err) {
+		writeEngineNotListening(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusBadGateway)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		jsonKeyError: map[string]string{
 			jsonKeyCode:    "upstream_unreachable",
 			jsonKeyMessage: "upstream engine unreachable: " + err.Error(),
+		},
+	})
+}
+
+// codeNotReady is the data plane's not-ready code; dataplane and
+// controlplane each hold the same literal, and clients pin on it.
+const codeNotReady = "not_ready"
+
+// engineRefusedDial reports whether the request never reached the engine
+// because nothing was listening. That is the window a card edit opens: the
+// wrapper stops the engine, and until the next health probe notices, the
+// data plane still reads ready. Nothing was sent, so nothing is lost by
+// asking the caller to come back.
+func engineRefusedDial(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
+}
+
+// writeEngineNotListening answers a refused dial the way the readiness gate
+// answers a known-down engine, so a client sees one retryable 503 rather
+// than a 502 that reads as a broken gateway.
+func writeEngineNotListening(w http.ResponseWriter, err error) {
+	w.Header().Set("Retry-After", "5")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		jsonKeyError: map[string]string{
+			jsonKeyCode:    codeNotReady,
+			jsonKeyMessage: "engine is not accepting connections (restarting?): " + err.Error(),
 		},
 	})
 }
