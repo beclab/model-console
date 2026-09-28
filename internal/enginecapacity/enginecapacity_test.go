@@ -480,3 +480,23 @@ func hasWarning(warnings []string, substr string) bool {
 	}
 	return false
 }
+
+func TestProbeFreeTokenRetainsDeclaredConcurrency(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected capacity probe: %s", r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	got := Probe(context.Background(), Options{
+		Kind:                     config.EngineFreeToken,
+		EngineURL:                srv.URL,
+		Args:                     parseArgs(t, config.EngineFreeToken, "--max-running-requests 4 --kv-reserve-tokens 8192"),
+		ConfiguredMaxConcurrency: 99,
+	})
+	if got.MaxConcurrency != 4 || got.ContextSize != 0 || got.PoolTokens != 0 {
+		t.Fatalf("unexpected capacity: %+v", got)
+	}
+	if got.Source != SourceEngineArgs || !slices.Contains(got.FromArgs, FieldMaxConcurrency) || len(got.Warnings) != 0 {
+		t.Errorf("unexpected capacity provenance: %+v", got)
+	}
+}

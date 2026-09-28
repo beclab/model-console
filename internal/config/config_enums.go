@@ -12,6 +12,7 @@ const (
 	EngineVLLM      EngineKind = "vllm"
 	EngineLlamaCpp  EngineKind = "llamacpp"
 	EngineSGLang    EngineKind = "sglang"
+	EngineFreeToken EngineKind = "freetoken"
 	EngineEmbed     EngineKind = "embed"
 	EngineClipEmbed EngineKind = "clipembed"
 	EngineAudio     EngineKind = "audio"
@@ -27,6 +28,7 @@ var AllEngineKinds = []string{
 	string(EngineVLLM),
 	string(EngineLlamaCpp),
 	string(EngineSGLang),
+	string(EngineFreeToken),
 	string(EngineEmbed),
 	string(EngineClipEmbed),
 	string(EngineAudio),

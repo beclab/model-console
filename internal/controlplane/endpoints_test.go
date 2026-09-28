@@ -972,3 +972,19 @@ func TestEndpoints_EngineSpecAbsentIsSilent(t *testing.T) {
 		}
 	}
 }
+
+func TestEndpointsFreeTokenChat(t *testing.T) {
+	s := endpointsFixtureMode(t, config.EngineFreeToken, "chat", func(o *Options) {
+		o.DataPlane = func(_ *http.ServeMux) {}
+	})
+	list := parseEndpoints(t, get(t, s, "/api/endpoints").Body)
+	if list.EngineKind != "freetoken" {
+		t.Fatalf("kind = %q", list.EngineKind)
+	}
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+		e := findByPath(t, list, "POST", path)
+		if !e.Available {
+			t.Errorf("%s unavailable: %v", path, e.Reasons)
+		}
+	}
+}

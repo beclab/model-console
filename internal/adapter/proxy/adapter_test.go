@@ -145,6 +145,7 @@ func TestProxy_ResponsesRewritesModel(t *testing.T) {
 	for _, k := range []config.EngineKind{
 		config.EngineVLLM,
 		config.EngineSGLang,
+		config.EngineFreeToken,
 		config.EngineLlamaCpp,
 	} {
 		k := k

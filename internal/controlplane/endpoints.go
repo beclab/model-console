@@ -667,6 +667,8 @@ func applyDataPlaneCatalog(
 // without forcing operators to read CHANGELOG.
 func responsesDescription(kind config.EngineKind) string {
 	switch kind {
+	case config.EngineFreeToken:
+		return "OpenAI Responses API; pass-through to FreeToken. Stateless only."
 	case config.EngineOllama:
 		return "OpenAI Responses API; reverse-proxied to the Ollama daemon (stateless only — no previous_response_id / conversation)."
 	case config.EngineSGLang:

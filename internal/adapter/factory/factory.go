@@ -24,8 +24,8 @@ import (
 // the adapters degrade gracefully (counters / histograms become
 // no-ops) when nil is passed.
 //
-// Ollama gets its bespoke OpenAI<->Ollama translator; the three OpenAI-
-// native engines (vLLM, llama.cpp, SGLang) all share the proxy.Adapter
+// Ollama gets its bespoke OpenAI<->Ollama translator; OpenAI-native
+// engines (including FreeToken) share the proxy.Adapter
 // implementation parameterised by Kind. An empty Kind selects the
 // download-only nullengine adapter (no engine to serve). Anything else
 // is rejected here rather than at first request so misconfiguration
@@ -36,7 +36,7 @@ func New(cfg config.Config, metrics *obs.Metrics) (adapter.Adapter, error) {
 		return nullengine.New(), nil
 	case config.EngineOllama:
 		return ollama.NewAdapter(cfg), nil
-	case config.EngineVLLM, config.EngineLlamaCpp, config.EngineSGLang, config.EngineEmbed, config.EngineClipEmbed, config.EngineAudio, config.EngineOCR, config.EngineRerank, config.EngineMusic, config.EngineSystemOne:
+	case config.EngineVLLM, config.EngineLlamaCpp, config.EngineSGLang, config.EngineFreeToken, config.EngineEmbed, config.EngineClipEmbed, config.EngineAudio, config.EngineOCR, config.EngineRerank, config.EngineMusic, config.EngineSystemOne:
 		a, err := proxy.NewAdapter(cfg, cfg.Engine.Kind)
 		if err != nil {
 			return nil, err

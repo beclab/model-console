@@ -20,7 +20,7 @@ Applications use one port instead of addressing an engine directly. Model
 Console exposes OpenAI-compatible `/v1/*` routes, Anthropic Messages, selected
 Ollama-native routes, and capability-specific Audio, OCR, Translate, Embedding,
 Rerank, and Music endpoints. Requests are translated or proxied to Ollama,
-vLLM, llama.cpp, SGLang, or a sibling capability engine as appropriate.
+vLLM, llama.cpp, SGLang, FreeToken, or a sibling capability engine as appropriate.
 
 ### 3. Engine lifecycle
 
@@ -58,6 +58,14 @@ curl -s http://127.0.0.1:8080/api/model-spec
 The `deploy/compose/` and `deploy/k8s/` directories contain engine-specific
 examples. Production deployments should pin an explicit image version instead
 of using `latest`.
+
+### FreeToken
+
+Set `ENGINE_KIND=freetoken` to use the shared OpenAI proxy with the sibling
+service `http://freetoken:1919`. FreeToken `ft serve` flags are accepted through
+`ENGINE_ARGS`, including MoE placement flags and `--max-running-requests`.
+Unknown flags are preserved. `--kv-reserve-tokens` does not declare a context
+window or a fixed KV pool capacity.
 
 ## Development
 

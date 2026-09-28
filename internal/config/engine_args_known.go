@@ -194,6 +194,41 @@ var sglangKnownFlags = map[string]string{
 	"--random-seed":          "random_seed",
 }
 
+// freetokenKnownFlags maps FreeToken `ft serve` CLI flags to normalised
+// keys. FreeToken resolves almost everything from the checkpoint and the
+// hardware -- dtype, attention backend, KV capacity, CUDA graph sizes,
+// tool-call and reasoning parsers -- so the flags an operator actually
+// writes are the MoE-placement ones, and that is what this table covers.
+//
+// It is deliberately shorter than the vLLM and SGLang tables. Anything
+// absent still reaches the engine: parseCmdlineArgs files unmatched
+// tokens under Unknown and the wrapper word-splits them into argv
+// verbatim. A flag guessed into this table would be worse than a missing
+// one, because a normalised key is what the model card publishes.
+var freetokenKnownFlags = map[string]string{
+	// auto | fused | offload | cpu | hybrid. `auto` resolves dense
+	// models to fused (the whole model must fit in VRAM) and MoE models
+	// to offload, upgrading to hybrid when the `ft bench bw` profile
+	// says CPU compute beats the PCIe pull.
+	//
+	// Two spellings each, and both are FreeToken's own: `ft serve
+	// --help` on 0.1.3 documents --moe-backend as deprecated in favour
+	// of --moe-strategy, and --model as an alias of --model-path. They
+	// normalise to one key so a card reads the same either way.
+	"--moe-strategy":         "moe_backend",
+	"--moe-backend":          "moe_backend",
+	"--moe-cpu-threads":      "moe_cpu_threads",
+	"--moe-cache-auto":       "moe_cache_auto",
+	"--expert-load":          "expert_load",
+	"--kv-reserve-tokens":    "kv_reserve_tokens",
+	"--max-running-requests": "max_running_requests",
+	"--model-path":           "model",
+	"--model":                "model",
+	"--served-model-name":    "served_model_name",
+	"--port":                 "port",
+	"--host":                 "host",
+}
+
 // contextSizeKeys names, per engine, the normalised key above that holds
 // the per-request context window. It belongs beside the tables it quotes:
 // renaming a key there without renaming it here would leave the window
@@ -216,8 +251,9 @@ var contextSizeKeys = map[EngineKind]string{
 // not refused, which is exactly why the number has to travel: a caller
 // who cannot see it reads its own queueing as the model being slow.
 var maxConcurrencyKeys = map[EngineKind]string{
-	EngineLlamaCpp: "parallel",
-	EngineVLLM:     "max_num_seqs",
-	EngineSGLang:   "max_running_requests",
-	EngineOllama:   "num_parallel",
+	EngineFreeToken: "max_running_requests",
+	EngineLlamaCpp:  "parallel",
+	EngineVLLM:      "max_num_seqs",
+	EngineSGLang:    "max_running_requests",
+	EngineOllama:    "num_parallel",
 }

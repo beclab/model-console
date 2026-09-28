@@ -232,6 +232,9 @@ func probeEngine(ctx context.Context, opts Options) (reported, []string) {
 		return probeOllama(ctx, c, opts.Model, opts.Args)
 	case config.EngineVLLM:
 		return probeVLLM(ctx, c)
+	case config.EngineFreeToken:
+		// FreeToken has no supported capacity probe; retain declared concurrency.
+		return reported{}, nil
 	default:
 		return probeSiblingCapacity(ctx, c)
 	}
@@ -239,7 +242,7 @@ func probeEngine(ctx context.Context, opts Options) (reported, []string) {
 
 func isLLMEngine(kind config.EngineKind) bool {
 	switch kind {
-	case config.EngineLlamaCpp, config.EngineSGLang, config.EngineOllama, config.EngineVLLM:
+	case config.EngineLlamaCpp, config.EngineSGLang, config.EngineOllama, config.EngineVLLM, config.EngineFreeToken:
 		return true
 	default:
 		return false

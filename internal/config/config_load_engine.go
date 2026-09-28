@@ -57,6 +57,7 @@ const (
 	defaultVLLMURL      = "http://vllm:8000"
 	defaultLlamaCppURL  = "http://llamacpp:8081"
 	defaultSGLangURL    = "http://sglang:30000"
+	defaultFreeTokenURL = "http://freetoken:1919"
 	defaultEmbedURL     = "http://embed:8080"
 	defaultClipEmbedURL = "http://clipembed:8080"
 	defaultAudioURL     = "http://audio-engine:8000"
@@ -80,6 +81,8 @@ func deriveEngineURL(kind EngineKind) string {
 		return defaultLlamaCppURL
 	case EngineSGLang:
 		return defaultSGLangURL
+	case EngineFreeToken:
+		return defaultFreeTokenURL
 	case EngineEmbed:
 		return defaultEmbedURL
 	case EngineClipEmbed:
