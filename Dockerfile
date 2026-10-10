@@ -49,7 +49,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 #
 # Pinned by digest (multi-arch image index covering amd64 + arm64); the
 # tag stays inline so Dependabot can resolve + bump tag and digest together.
-FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS runtime
+FROM python:3.14-slim@sha256:caaf356f40667c496d405780745b9ac25771c189a51dfcc42430d531ea09f8a2 AS runtime
 
 ARG VERSION=dev
 ARG COMMIT=none
