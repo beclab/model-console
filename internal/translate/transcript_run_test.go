@@ -227,6 +227,261 @@ func TestTranscript_StripsEchoedSpeakerLabels(t *testing.T) {
 	}
 }
 
+// Labels are removed line by line, and only labels this request showed. A
+// model that echoes some lines and not others still has its echoes cleaned, a
+// neighbour's label is a label too, and a bracket that is part of what was
+// said stays.
+func TestTranscript_StripsOnlyTheLabelsItShowed(t *testing.T) {
+	t.Parallel()
+	segments := []transcriptSegment{
+		{ID: "s1", Speaker: "SPEAKER_02", Text: "line 1"},
+		{ID: "s2", Speaker: "SPEAKER_01", Text: "line 2"},
+		{ID: "s3", Speaker: "SPEAKER_01", Text: "line 3"},
+		{ID: "s4", Speaker: "SPEAKER_02", Text: "line 4"},
+	}
+	engine := &fakeEngine{reply: func(_ int, _ engineCall) (int, string, string) {
+		return http.StatusOK, "1. [SPEAKER_02] 第一句\n" +
+			"2. 第二句\n" +
+			"3. [SPEAKER_02] 第三句\n" +
+			"4. [笑] 第四句\n", ""
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: segments,
+	}))
+	want := []string{"第一句", "第二句", "第三句", "[笑] 第四句"}
+	for i, res := range out.Segments {
+		if res.Text != want[i] || res.Error != "" {
+			t.Errorf("turn %d = %+v, want text %q", i+1, res, want[i])
+		}
+	}
+	if len(engine.calls) != 1 {
+		t.Errorf("calls=%d want one: the reply lined up", len(engine.calls))
+	}
+}
+
+// A line that is only a label is a turn the model folded into its neighbour,
+// as Hy-MT2-1.8B did with "Innovator." on a real meeting. The rest of the
+// reply stands, and only that turn and the two either side of it are asked
+// for again, reading what came before them as lead-in.
+func TestTranscript_AsksAgainOnlyAroundALabelAlone(t *testing.T) {
+	t.Parallel()
+	engine := &fakeEngine{reply: func(_ int, call engineCall) (int, string, string) {
+		if call.Lines == 3 {
+			return http.StatusOK, "1. [Alice] 补二\n2. 补三\n3. 补四\n", ""
+		}
+		var b strings.Builder
+		for i := 1; i <= call.Lines; i++ {
+			if i == 3 {
+				fmt.Fprintf(&b, "%d. [Alice]\n", i)
+				continue
+			}
+			fmt.Fprintf(&b, "%d. [Alice] 第%d句\n", i, i)
+		}
+		return http.StatusOK, b.String(), ""
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(6),
+	}))
+	want := []string{"第1句", "补二", "补三", "补四", "第5句", "第6句"}
+	for i, res := range out.Segments {
+		if res.Text != want[i] || res.Error != "" {
+			t.Errorf("turn %d = %+v, want text %q", i+1, res, want[i])
+		}
+	}
+	if len(engine.calls) != 2 {
+		t.Fatalf("calls=%d want two: the group, then the three turns around the hole", len(engine.calls))
+	}
+	again := engine.calls[1]
+	if !strings.Contains(again.User, "[Alice] line 2") || !strings.Contains(again.User, "[Alice] line 4") ||
+		strings.Contains(again.User, "line 5") {
+		t.Errorf("second call asked for:\n%s\nwant turns 2 to 4 only", again.User)
+	}
+	if !strings.Contains(again.System, "[Alice] line 1") {
+		t.Errorf("second call lead-in lacks turn 1:\n%s", again.System)
+	}
+}
+
+// When neither the neighbours nor the turn on its own get an answer, the
+// turn comes back empty and reported, and its neighbours keep the first
+// answer rather than being lost with it.
+func TestTranscript_LeavesALabelAloneEmptyWhenAskingAgainDoesNotHelp(t *testing.T) {
+	t.Parallel()
+	engine := &fakeEngine{reply: func(_ int, call engineCall) (int, string, string) {
+		var b strings.Builder
+		for i := 1; i <= call.Lines; i++ {
+			if strings.Contains(call.User, fmt.Sprintf("%d. [Alice] line 3", i)) {
+				fmt.Fprintf(&b, "%d. [Alice]\n", i)
+				continue
+			}
+			fmt.Fprintf(&b, "%d. [Alice] 第%d句\n", i, i)
+		}
+		return http.StatusOK, b.String(), ""
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(4),
+	}))
+	want := []string{"第1句", "第2句", "", "第4句"}
+	for i, res := range out.Segments {
+		wantErr := ""
+		if i == 2 {
+			wantErr = segmentErrUnaligned
+		}
+		if res.Text != want[i] || res.Error != wantErr {
+			t.Errorf("turn %d = %+v, want text %q error %q", i+1, res, want[i], wantErr)
+		}
+	}
+	if len(engine.calls) != 3 {
+		t.Errorf("calls=%d want three: the group, the window, the turn alone", len(engine.calls))
+	}
+}
+
+// When asking with the neighbours folds the turn away again, the turn is
+// asked for on its own, where it has nothing to fold into. Its answer is
+// taken, and the neighbours keep the first one.
+func TestTranscript_AsksForAStubbornHoleOnItsOwn(t *testing.T) {
+	t.Parallel()
+	folding := labelAlone("line 3")
+	engine := &fakeEngine{reply: func(n int, call engineCall) (int, string, string) {
+		if call.Lines == 1 {
+			return http.StatusOK, "1. 单独一句", ""
+		}
+		return folding(n, call)
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(4),
+	}))
+	want := []string{"译1", "译2", "单独一句", "译4"}
+	for i, res := range out.Segments {
+		if res.Text != want[i] || res.Error != "" {
+			t.Errorf("turn %d = %+v, want text %q", i+1, res, want[i])
+		}
+	}
+	if len(engine.calls) != 3 {
+		t.Fatalf("calls=%d want three: the group, the window, the turn alone", len(engine.calls))
+	}
+	if alone := engine.calls[2]; alone.Lines != 1 || !strings.Contains(alone.System, "[Alice] line 2") {
+		t.Errorf("last call asked for %d turns with lead-in:\n%s\nwant turn 3 alone after turn 2", alone.Lines, alone.System)
+	}
+}
+
+// labelAlone answers every numbered line, giving a label alone to the turns
+// whose source text is in alone.
+func labelAlone(alone ...string) func(int, engineCall) (int, string, string) {
+	return func(_ int, call engineCall) (int, string, string) {
+		_, body, _ := strings.Cut(call.User, "Lines to translate:\n")
+		var b strings.Builder
+		for i, line := range strings.Split(strings.TrimSpace(body), "\n") {
+			folded := false
+			for _, text := range alone {
+				folded = folded || strings.HasSuffix(line, "] "+text)
+			}
+			if folded {
+				fmt.Fprintf(&b, "%d. [Alice]\n", i+1)
+				continue
+			}
+			fmt.Fprintf(&b, "%d. 译%d\n", i+1, i+1)
+		}
+		return http.StatusOK, b.String(), ""
+	}
+}
+
+// A hole found in the second half of a split group is reported on the turn
+// it belongs to, not on the turn at the same position in the first half.
+func TestTranscript_ReportsAHoleOnItsOwnTurnAfterASplit(t *testing.T) {
+	t.Parallel()
+	answer := labelAlone("line 7")
+	engine := &fakeEngine{reply: func(n int, call engineCall) (int, string, string) {
+		if call.Lines == 8 {
+			return http.StatusOK, "1. 只有一行", ""
+		}
+		return answer(n, call)
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(8),
+	}))
+	for i, res := range out.Segments {
+		wantErr := ""
+		if i == 6 {
+			wantErr = segmentErrUnaligned
+		}
+		if res.Error != wantErr || (wantErr == "") != (res.Text != "") {
+			t.Errorf("turn %d = %+v, want error %q", i+1, res, wantErr)
+		}
+	}
+}
+
+// Holes next to each other are asked for in one call, and a hole on the first
+// or last line is asked for with the one neighbour it has.
+func TestTranscript_AsksForAdjacentHolesTogether(t *testing.T) {
+	t.Parallel()
+	first := labelAlone("line 1", "line 2", "line 6")
+	answer := labelAlone()
+	engine := &fakeEngine{reply: func(n int, call engineCall) (int, string, string) {
+		if n == 1 {
+			return first(n, call)
+		}
+		return answer(n, call)
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(6),
+	}))
+	for i, res := range out.Segments {
+		if res.Error != "" || res.Text == "" {
+			t.Errorf("turn %d = %+v, want it translated", i+1, res)
+		}
+	}
+	if len(engine.calls) != 3 {
+		t.Fatalf("calls=%d want three: the group, turns 1-3, turns 5-6", len(engine.calls))
+	}
+	if got := []int{engine.calls[1].Lines, engine.calls[2].Lines}; got[0] != 3 || got[1] != 2 {
+		t.Errorf("asked again for %v turns, want [3 2]", got)
+	}
+}
+
+// A reply that answers no turn at all is not patched: it is a reply that does
+// not line up, owed the retry and the halving.
+func TestTranscript_RetriesAReplyThatIsAllLabels(t *testing.T) {
+	t.Parallel()
+	engine := &fakeEngine{reply: labelAlone("line 1", "line 2", "line 3")}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(3),
+	}))
+	for i, res := range out.Segments {
+		if res.Error != segmentErrUnaligned {
+			t.Errorf("turn %d = %+v, want it unaligned", i+1, res)
+		}
+	}
+	// The group and its retry, then each half and its retry: 1+2 split.
+	if len(engine.calls) != 6 {
+		t.Errorf("calls=%d want six: retry and halving, not a patch", len(engine.calls))
+	}
+}
+
+// When asking again fails at the engine, the hole says so: a caller deciding
+// whether to ask again reads the reason.
+func TestTranscript_ReportsAnEngineFailureWhenAskingAgain(t *testing.T) {
+	t.Parallel()
+	first := labelAlone("line 2")
+	engine := &fakeEngine{reply: func(n int, call engineCall) (int, string, string) {
+		if n == 1 {
+			return first(n, call)
+		}
+		return http.StatusInternalServerError, "", ""
+	}}
+	out := decodeTranscript(t, postTranscript(t, mountFake(t, engine), transcriptRequest{
+		To: "zh-Hans", Segments: turns(3),
+	}))
+	want := []string{"", segmentErrUpstream, ""}
+	for i, res := range out.Segments {
+		if res.Error != want[i] {
+			t.Errorf("turn %d = %+v, want error %q", i+1, res, want[i])
+		}
+	}
+	if len(engine.calls) != 2 {
+		t.Errorf("calls=%d want two: a failing engine is not asked again turn by turn", len(engine.calls))
+	}
+}
+
 // A stuck decoder repeats inside one line, which the alignment check cannot
 // see.
 func TestTranscript_CollapsesARepeatingReply(t *testing.T) {

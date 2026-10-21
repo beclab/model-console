@@ -113,6 +113,19 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Fixed
 
+- **`/translate/transcript` no longer returns turns still prefixed with their
+  speaker label.** The labels it shows the model came back mirrored, and the
+  cleanup removed them only when every line of a reply carried one and none
+  was left empty, so one turn Hy-MT2-1.8B folded into its neighbour — the
+  tail of a sentence split across two speakers, which Chinese puts
+  mid-sentence — sent a whole group of sixteen turns to the caller as
+  `[SPEAKER_01] …`. Labels are now removed line by line, and only the labels
+  that call showed, so a bracket that is part of what was said stays. A turn
+  answered with its label alone — which used to reach the caller as the bare
+  label, with no translation in it — is asked for again together with the
+  turn either side of it, and then on its own, while the rest of the reply is
+  kept. On its own it may repeat a word its neighbour already carries; it
+  comes back empty (`unaligned`) only when that call fails too.
 - A repository holding two files with the same name in different
   directories now reports both. `huggingface_hub` labels a download bar
   with the file name alone, and progress keyed on that label, so the

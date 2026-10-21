@@ -212,28 +212,57 @@ func splitNumberPrefix(line string) (int, string, bool) {
 	return n, strings.TrimSpace(rest), true
 }
 
-// stripEchoedLabels removes speaker labels a model mirrored back.
+// labelsShown is every speaker label labelled put in front of the model for one
+// call: the turns to translate and the lead-in both carry them.
+func labelsShown(task transcriptTask) map[string]bool {
+	shown := map[string]bool{}
+	for _, sg := range task.segments {
+		if sg.Speaker != "" {
+			shown[sg.Speaker] = true
+		}
+	}
+	for _, line := range task.context {
+		if line.Speaker != "" {
+			shown[line.Speaker] = true
+		}
+	}
+	return shown
+}
+
+// stripEchoedLabels removes speaker labels a model mirrored back, and returns
+// the lines that were nothing but a label as holes, left empty in the result.
 //
 // The turns it is shown carry one, because who is speaking is what makes a
 // dialogue readable and what a pronoun refers back to. A model mirrors the
 // format it was shown however plainly rule 2 tells it not to, and this is the
-// cleanup — applied only when every line carries a label, since a model
-// echoing the format does it for the whole reply while a line that genuinely
-// opens with a bracket is one line.
-func stripEchoedLabels(lines []string) []string {
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "[") || !strings.Contains(line, "]") {
-			return lines
-		}
-	}
-	out := make([]string, len(lines))
+// cleanup. It is the inverse of labelled, so it removes only labels this call
+// put there: a line that genuinely opens with a bracket is left alone without
+// having to guess, and each line is cleaned on its own.
+//
+// Any label shown, not only the turn's own: a model that merges two turns can
+// leave one turn's label on its neighbour's line. The guess this replaces gave
+// up on the whole reply when one line did not fit it, and sent sixteen turns of
+// a meeting back still prefixed because one of them was a label alone.
+//
+// A line that is only a label is a turn the model did not answer — it moved
+// that turn's text into its neighbour — so it is a hole, not an empty
+// translation. The other lines stand: one turn folded into the next is no
+// reason to doubt the rest of the reply.
+func stripEchoedLabels(lines []string, shown map[string]bool) (out []string, holes []int) {
+	out = make([]string, len(lines))
 	for i, line := range lines {
-		_, after, _ := strings.Cut(line, "]")
+		out[i] = line
+		if !strings.HasPrefix(line, "[") {
+			continue
+		}
+		label, after, ok := strings.Cut(line[1:], "]")
+		if !ok || !shown[label] {
+			continue
+		}
 		out[i] = strings.TrimSpace(after)
 		if out[i] == "" {
-			// Whatever that was, it was not only a label.
-			return lines
+			holes = append(holes, i)
 		}
 	}
-	return out
+	return out, holes
 }
