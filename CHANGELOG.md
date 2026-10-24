@@ -113,6 +113,15 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Fixed
 
+- The model card's `extensions.capacity` now follows an engine whose pod an
+  upgrade replaced. The capacity reporter re-read the engine only on a
+  readiness dip or a relaunch this process asked for, and a replaced pod
+  comes back inside the health loop's grace window, so the card kept the old
+  engine's capacity — on pptest03 an ASR engine raised to 3 stayed at 1, and
+  Router refused every second caller. The health loop now counts the times
+  the engine answers again after failing probes, and that count arms the
+  next reading.
+
 - A repository holding two files with the same name in different
   directories now reports both. `huggingface_hub` labels a download bar
   with the file name alone, and progress keyed on that label, so the

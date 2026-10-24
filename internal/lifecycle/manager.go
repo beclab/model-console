@@ -173,6 +173,10 @@ type Manager struct {
 	// loop; atomic so a test can read it without racing that goroutine.
 	unhealthySince atomic.Pointer[time.Time]
 
+	// engineReturns counts the times the engine answered healthy again
+	// after a run of failing probes. See EngineReturns.
+	engineReturns atomic.Uint64
+
 	// relaunchLoading records that the health loop is the one who put the
 	// current PhaseLoading there, so it may take it away again. Without
 	// it the loop could not tell its own loading from the one ensure()

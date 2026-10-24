@@ -320,6 +320,37 @@ func TestHealthLoop_RecoveryReturnsToReady(t *testing.T) {
 	}
 }
 
+// An engine whose pod is replaced comes back inside the grace window, so
+// readiness never dips and no relaunch was asked for. The failed probes in
+// between are the only trace, and the capacity reporter re-reads the
+// engine on the count of them; without it the card kept the replaced
+// engine's capacity, which is what Router admits requests against.
+func TestHealthLoop_CountsEngineReturnsInsideTheGrace(t *testing.T) {
+	answers := []error{nil, errors.New("connection refused"), errors.New("connection refused"), nil, nil}
+	var n atomic.Int32
+	fa := &fakeAdapter{
+		kind: "test",
+		readyFn: func(context.Context) (adapter.ReadyState, error) {
+			if err := answers[n.Add(1)-1]; err != nil {
+				return adapter.ReadyState{}, err
+			}
+			return adapter.ReadyState{Alive: true, ModelExists: true}, nil
+		},
+	}
+	m := readyManager(fa, time.Hour, time.Hour)
+
+	for range answers {
+		m.probeAndPublish(context.Background(), context.Background())
+	}
+
+	if got := m.EngineReturns(); got != 1 {
+		t.Fatalf("EngineReturns = %d after one outage, want 1", got)
+	}
+	if got := phaseOf(m); got != progress.PhaseReady {
+		t.Fatalf("phase = %q, want ready: the outage was inside the grace", got)
+	}
+}
+
 // relaunchManager is a readyManager that also knows whether the engine is
 // being relaunched by its wrapper — the one fact a probe cannot supply.
 func relaunchManager(fa *fakeAdapter, interval, grace time.Duration, inFlight *atomic.Bool) *Manager {

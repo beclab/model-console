@@ -462,9 +462,15 @@ func run(args []string, stdout, stderr *os.File, getenv config.Getenv) int {
 			Ready: lc.Ready,
 			// The relaunch a card edit causes happens inside the health
 			// loop's grace period, so readiness alone would leave this
-			// reporting the engine that has just been replaced.
-			Restarted: runtimeCfg.Handoff().Relaunch,
-			Record:    runtimeCfg.RecordCapacity,
+			// reporting the engine that has just been replaced. The
+			// engine coming back from failed probes counts as well: an
+			// upgrade that replaces the engine's pod relaunches it
+			// without the handoff, and the card would otherwise keep the
+			// old engine's capacity until llm-init itself restarted.
+			Restarted: func() string {
+				return runtimeCfg.Handoff().Relaunch() + "/" + strconv.FormatUint(lc.EngineReturns(), 10)
+			},
+			Record: runtimeCfg.RecordCapacity,
 		}
 		go reporter.Run(lcCtx)
 	}

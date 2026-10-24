@@ -156,7 +156,9 @@ func (m *Manager) probeAndPublish(parentCtx, probeCtx context.Context) {
 	}
 
 	if healthy {
-		m.unhealthySince.Store(nil)
+		if m.unhealthySince.Swap(nil) != nil {
+			m.engineReturns.Add(1)
+		}
 		m.recoverFromEngineOutage()
 		return
 	}
@@ -207,6 +209,19 @@ func (m *Manager) probeAndPublish(parentCtx, probeCtx context.Context) {
 		m.requestReensure()
 	}
 }
+
+// EngineReturns counts the times the engine answered healthy again after
+// failing at least one probe.
+//
+// It is how a consumer learns the engine may no longer be the one it last
+// measured. The handoff's relaunch token only covers relaunches this
+// process asked the wrapper for, and readiness only dips after the grace
+// window. Neither sees the engine's pod replaced by an upgrade, or an
+// engine that crashed and came back inside the grace -- yet either can
+// come back with different capacity, and the probes in between fail.
+// A transient probe failure counts too; re-reading an engine that did not
+// change costs one request.
+func (m *Manager) EngineReturns() uint64 { return m.engineReturns.Load() }
 
 // markEngineRelaunching moves a ready model to loading while a relaunch
 // of the engine is outstanding. The bool reports whether this call is the
