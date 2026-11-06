@@ -46,6 +46,14 @@ type Options struct {
 	Downloader fetch.RangeDownloader
 	Client     *http.Client // for the /system_stats probe
 
+	// Models of at least ParallelMin bytes are fetched over Connections
+	// concurrent byte ranges through DownloadClient; smaller ones, or an
+	// upstream without range support, use Downloader.
+	Connections    int
+	ParallelMin    int64
+	SegmentRetries int
+	DownloadClient *http.Client
+
 	ProbeInterval  time.Duration
 	RecheckEvery   time.Duration // how often finished models are re-stat'ed
 	RetryBackoff   time.Duration
@@ -75,6 +83,24 @@ func New(opts Options) *Console {
 	}
 	if opts.Client == nil {
 		opts.Client = &http.Client{Timeout: 3 * time.Second}
+	}
+	if opts.Connections <= 0 {
+		opts.Connections = 8
+	}
+	if opts.ParallelMin <= 0 {
+		opts.ParallelMin = 64 << 20
+	}
+	if opts.SegmentRetries <= 0 {
+		opts.SegmentRetries = 30
+	}
+	if opts.DownloadClient == nil {
+		// No overall timeout: a range of a 20 GB file streams for minutes.
+		opts.DownloadClient = &http.Client{Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: 60 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConnsPerHost:   32,
+		}}
 	}
 	if opts.ProbeInterval <= 0 {
 		opts.ProbeInterval = 2 * time.Second
@@ -191,18 +217,7 @@ func (c *Console) ensure(ctx context.Context, it *itemState) error {
 	}
 	_ = os.Remove(marker)
 
-	var have int64
-	if info, err := os.Stat(dest + ".part"); err == nil {
-		have = info.Size()
-	}
-	c.set(it, StateDownloading, have, "")
-	sink := &bytesSink{c: c, it: it}
-	if err := c.opts.Downloader.Download(ctx, fetch.RangeOptions{
-		URL:          m.URL,
-		DestPath:     dest,
-		ExpectedSize: m.Size,
-		Headers:      c.opts.Headers,
-	}, sink); err != nil {
+	if err := c.download(ctx, it, dest); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 	if err := c.verify(ctx, it, dest, marker); err != nil {
@@ -212,6 +227,31 @@ func (c *Console) ensure(ctx context.Context, it *itemState) error {
 		return err
 	}
 	return nil
+}
+
+func (c *Console) download(ctx context.Context, it *itemState, dest string) error {
+	m := it.model
+	if c.opts.Connections > 1 && m.Size >= c.opts.ParallelMin {
+		c.set(it, StateDownloading, 0, "")
+		err := c.downloadParallel(ctx, m, dest, func(n int64) { c.set(it, StateDownloading, n, "") })
+		if !errors.Is(err, errNoRanges) {
+			return err
+		}
+		c.opts.Logger.Warn("upstream ignored Range, downloading in one stream", "model", m.RelPath())
+		_ = os.Remove(dest + ".part.json")
+		_ = os.Remove(dest + ".part")
+	}
+	var have int64
+	if info, err := os.Stat(dest + ".part"); err == nil {
+		have = info.Size()
+	}
+	c.set(it, StateDownloading, have, "")
+	return c.opts.Downloader.Download(ctx, fetch.RangeOptions{
+		URL:          m.URL,
+		DestPath:     dest,
+		ExpectedSize: m.Size,
+		Headers:      c.opts.Headers,
+	}, &bytesSink{c: c, it: it})
 }
 
 func (c *Console) verify(ctx context.Context, it *itemState, dest, marker string) error {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ import (
 //	COMFYUI_URL       ComfyUI base URL (default http://127.0.0.1:8188)
 //	PORT              listen port (default 8090)
 //	HF_TOKEN          optional bearer token for huggingface.co downloads
+//	COMFY_DOWNLOAD_CONNECTIONS  concurrent byte ranges per large model (default 8)
 //	LOG_LEVEL / LOG_FORMAT  as in the LLM mode
 func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 	env := func(k, def string) string {
@@ -54,12 +56,23 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 		headers = http.Header{"Authorization": {"Bearer " + tok}}
 	}
 
+	conns := 0
+	if v := env("COMFY_DOWNLOAD_CONNECTIONS", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			fmt.Fprintf(stderr, "config error: COMFY_DOWNLOAD_CONNECTIONS must be a positive integer, got %q\n", v)
+			return exitConfig
+		}
+		conns = n
+	}
+
 	console := comfyconsole.New(comfyconsole.Options{
-		Config:    cfg,
-		ModelsDir: modelsDir,
-		ComfyURL:  strings.TrimRight(env("COMFYUI_URL", "http://127.0.0.1:8188"), "/"),
-		Headers:   headers,
-		Logger:    logger,
+		Config:      cfg,
+		ModelsDir:   modelsDir,
+		ComfyURL:    strings.TrimRight(env("COMFYUI_URL", "http://127.0.0.1:8188"), "/"),
+		Headers:     headers,
+		Connections: conns,
+		Logger:      logger,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

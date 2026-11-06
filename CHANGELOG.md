@@ -15,8 +15,10 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   sha256 verification (a marker under `.llm-init-verified/` skips re-hashing
   on restart), re-fetches a model that disappears, probes ComfyUI's
   `GET /system_stats`, and serves `GET /api/status` (ready only when every
-  model is verified and ComfyUI answers) plus a progress page at `/`. The
-  LLM mode is untouched.
+  model is verified and ComfyUI answers) plus a progress page at `/`. Models
+  of 64 MiB or more are fetched over `COMFY_DOWNLOAD_CONNECTIONS` (default 8)
+  byte ranges, checkpointed to `<file>.part.json`, since Hugging Face's CDN
+  throttles each connection. The LLM mode is untouched.
 
 ### Changed
 

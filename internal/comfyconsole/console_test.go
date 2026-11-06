@@ -24,6 +24,7 @@ type fixture struct {
 	srv     *httptest.Server
 	payload []byte
 	gets    atomic.Int32
+	ranged  atomic.Int64 // bytes served to Range requests
 	up      atomic.Bool
 }
 
@@ -36,7 +37,14 @@ func newFixture(t *testing.T) *fixture {
 			if r.Method == http.MethodGet {
 				f.gets.Add(1)
 			}
-			http.ServeContent(w, r, "model.safetensors", time.Unix(0, 0), bytes.NewReader(f.payload))
+			cw := &countingWriter{ResponseWriter: w}
+			http.ServeContent(cw, r, "model.safetensors", time.Unix(0, 0), bytes.NewReader(f.payload))
+			if r.Header.Get("Range") != "" {
+				f.ranged.Add(cw.n)
+			}
+		case "/norange.safetensors":
+			f.gets.Add(1)
+			_, _ = w.Write(f.payload)
 		case "/system_stats":
 			if !f.up.Load() {
 				http.Error(w, "starting", http.StatusServiceUnavailable)
@@ -230,5 +238,92 @@ func TestLoadConfig_Validation(t *testing.T) {
 		if (err == nil) != (name == "ok") {
 			t.Errorf("%s: err = %v", name, err)
 		}
+	}
+}
+
+type countingWriter struct {
+	http.ResponseWriter
+	n int64
+}
+
+func (w *countingWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.n += int64(n)
+	return n, err
+}
+
+func (f *fixture) parallelConsole(cfg *AppConfig, dir string) *Console {
+	c := f.console(cfg, dir)
+	c.opts.Connections = 4
+	c.opts.ParallelMin = 1
+	return c
+}
+
+func TestConsole_ParallelRangesAssembleTheFile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	dir := t.TempDir()
+	c := f.parallelConsole(f.config(sum(f.payload)), dir)
+	run(t, c)
+	waitFor(t, c, "done", func(s Status) bool { return s.Models.State == StateDone })
+
+	if got := f.gets.Load(); got < 4 {
+		t.Fatalf("GETs = %d, want one per range", got)
+	}
+	dest := filepath.Join(dir, "diffusion_models", "model.safetensors")
+	for _, leftover := range []string{dest + ".part", dest + ".part.json"} {
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("%s left behind: %v", leftover, err)
+		}
+	}
+}
+
+func TestConsole_ParallelResumesFromCheckpoint(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	dir := t.TempDir()
+	cfg := f.config(sum(f.payload))
+	dest := filepath.Join(dir, "diffusion_models", "model.safetensors")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two of four ranges already on disk.
+	size := int64(len(f.payload))
+	st := newPartState(size, 4)
+	part := make([]byte, size)
+	for _, s := range st.Segments[:2] {
+		copy(part[s.Start:s.End+1], f.payload[s.Start:s.End+1])
+		s.Next = s.End + 1
+	}
+	if err := os.WriteFile(dest+".part", part, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(st)
+	if err := os.WriteFile(dest+".part.json", raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := f.parallelConsole(cfg, dir)
+	run(t, c)
+	waitFor(t, c, "done", func(s Status) bool { return s.Models.State == StateDone })
+	remaining := size - (st.Segments[1].End + 1)
+	if got := f.ranged.Load(); got != remaining {
+		t.Fatalf("served %d bytes on resume, want %d", got, remaining)
+	}
+}
+
+func TestConsole_ParallelFallsBackWithoutRanges(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	dir := t.TempDir()
+	cfg := f.config(sum(f.payload))
+	cfg.Models[0].URL = f.srv.URL + "/norange.safetensors"
+	c := f.parallelConsole(cfg, dir)
+	run(t, c)
+	waitFor(t, c, "done", func(s Status) bool { return s.Models.State == StateDone })
+	got, err := os.ReadFile(filepath.Join(dir, "diffusion_models", "model.safetensors"))
+	if err != nil || !bytes.Equal(got, f.payload) {
+		t.Fatalf("fallback produced a bad file: %v", err)
 	}
 }
