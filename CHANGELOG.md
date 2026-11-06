@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
+### Added
+
+- `llm-init comfyui` runs the Model Console of a single-workflow ComfyUI
+  app. It reads a JSON app config (`COMFY_APP_CONFIG`) listing the models the
+  workflow needs, downloads them into `COMFY_MODELS_DIR` with resume and
+  sha256 verification (a marker under `.llm-init-verified/` skips re-hashing
+  on restart), re-fetches a model that disappears, probes ComfyUI's
+  `GET /system_stats`, and serves `GET /api/status` (ready only when every
+  model is verified and ComfyUI answers) plus a progress page at `/`. The
+  LLM mode is untouched.
+
 ### Changed
 
 - A chat card whose `max_output_tokens` is unset, or as large as its

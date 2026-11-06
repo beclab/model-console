@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Console</title>
+<style>
+  :root { --bg:#f7f7f8; --card:#fff; --fg:#1c1c1e; --muted:#6b6b70; --line:#e4e4e7; --accent:#2f6fed; --ok:#1f9d55; --bad:#d64545; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111113; --card:#1b1b1e; --fg:#ececee; --muted:#9a9aa0; --line:#2c2c30; --accent:#6c9bff; --ok:#4cc38a; --bad:#ff6b6b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system, "Segoe UI", "PingFang SC", sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:760px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+  .name { font-family: ui-monospace, Menlo, monospace; font-size:13px; word-break:break-all; }
+  .muted { color:var(--muted); font-size:12px; }
+  .bar { height:6px; background:var(--line); border-radius:3px; overflow:hidden; margin-top:8px; }
+  .bar > i { display:block; height:100%; background:var(--accent); width:0; transition:width .4s; }
+  .done > i { background:var(--ok); }
+  .err { color:var(--bad); font-size:12px; margin-top:6px; word-break:break-all; }
+  .pill { font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); }
+  .up { color:var(--ok); } .down { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Model Console</h1>
+  <p class="sub" id="summary">Loading…</p>
+  <div class="card">
+    <div class="row"><strong>ComfyUI</strong><span class="pill" id="backend">—</span></div>
+    <div class="row" style="margin-top:8px"><span>Models</span><span class="muted" id="total"></span></div>
+    <div class="bar" id="totalbar"><i></i></div>
+  </div>
+  <div id="items"></div>
+</main>
+<script>
+  const fmt = (n) => (n / 1e9).toFixed(2) + " GB";
+  function render(s) {
+    const m = s.models;
+    document.getElementById("summary").textContent = s.ready
+      ? "Ready. You can go back to the app."
+      : m.state === "done" ? "Models ready, waiting for ComfyUI to start…" : "Preparing models (" + m.state + ")…";
+    const b = document.getElementById("backend");
+    b.textContent = s.backend.state; b.className = "pill " + s.backend.state;
+    const have = m.items.reduce((a, i) => a + i.downloaded, 0), size = m.items.reduce((a, i) => a + i.size, 0);
+    document.getElementById("total").textContent = fmt(have) + " / " + fmt(size) + " · " + (m.progress * 100).toFixed(1) + "%";
+    const tb = document.getElementById("totalbar");
+    tb.firstElementChild.style.width = (m.progress * 100) + "%"; tb.classList.toggle("done", m.state === "done");
+    const box = document.getElementById("items");
+    box.replaceChildren(...m.items.map((i) => {
+      const el = document.createElement("div"); el.className = "card";
+      const pct = i.size ? (i.downloaded / i.size) * 100 : 0;
+      el.innerHTML = '<div class="row"><span class="name"></span><span class="pill"></span></div>' +
+        '<div class="muted"></div><div class="bar"><i></i></div>';
+      el.querySelector(".name").textContent = i.dir + "/" + i.name;
+      el.querySelector(".pill").textContent = i.state;
+      el.querySelector(".muted").textContent = fmt(i.downloaded) + " / " + fmt(i.size);
+      el.querySelector(".bar > i").style.width = pct + "%";
+      el.querySelector(".bar").classList.toggle("done", i.state === "done");
+      if (i.error) { const e = document.createElement("div"); e.className = "err"; e.textContent = i.error; el.append(e); }
+      return el;
+    }));
+  }
+  async function tick() {
+    try { const r = await fetch("api/status", { cache: "no-store" }); render(await r.json()); }
+    catch (e) { document.getElementById("summary").textContent = "Console unreachable: " + e.message; }
+    setTimeout(tick, 2000);
+  }
+  tick();
+</script>
+</body>
+</html>
