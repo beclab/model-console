@@ -2,10 +2,12 @@ package comfyconsole
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -95,11 +97,16 @@ func New(opts Options) *Console {
 	}
 	if opts.DownloadClient == nil {
 		// No overall timeout: a range of a 20 GB file streams for minutes.
+		// HTTP/1.1 only: over HTTP/2 every range shares one TCP connection,
+		// which the CDN throttles as a single stream.
 		opts.DownloadClient = &http.Client{Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
 			IdleConnTimeout:       90 * time.Second,
 			MaxIdleConnsPerHost:   32,
+			TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 		}}
 	}
 	if opts.ProbeInterval <= 0 {
