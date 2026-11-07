@@ -71,6 +71,8 @@ func (c *Console) Status() Status {
 	}
 	if total > 0 {
 		st.Models.Progress = float64(have) / float64(total)
+	} else if st.Models.State == StateDone {
+		st.Models.Progress = 1
 	}
 	st.Backend.State = BackendDown
 	if c.backend.Load() {

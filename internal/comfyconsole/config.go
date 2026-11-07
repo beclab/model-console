@@ -11,7 +11,6 @@ package comfyconsole
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -59,9 +58,7 @@ func LoadConfig(file string) (*AppConfig, error) {
 }
 
 func (c *AppConfig) validate() error {
-	if len(c.Models) == 0 {
-		return errors.New("models is empty")
-	}
+	// Image/video utilities can legitimately run without any model files.
 	seen := make(map[string]bool, len(c.Models))
 	for i, m := range c.Models {
 		if m.Name == "" || strings.ContainsAny(m.Name, `/\`) || m.Name == "." || m.Name == ".." {

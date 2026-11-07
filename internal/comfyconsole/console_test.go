@@ -235,7 +235,7 @@ func TestLoadConfig_Validation(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := LoadConfig(file)
-		if (err == nil) != (name == "ok") {
+		if (err == nil) != (name == "ok" || name == "empty") {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
@@ -348,5 +348,29 @@ func TestUseMirror(t *testing.T) {
 	}
 	if _, err := cfg.UseMirror("ftp://x"); err == nil {
 		t.Error("ftp endpoint accepted")
+	}
+}
+
+func TestConsole_NoModelsStillRequiresHealthyBackend(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "app.json")
+	if err := os.WriteFile(file, []byte(`{"workflow":{},"models":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	c := f.console(cfg, t.TempDir())
+	run(t, c)
+	st := c.Status()
+	if st.Ready || st.Models.State != StateDone || st.Models.Progress != 1 {
+		t.Fatalf("empty-model status with backend down: %+v", st)
+	}
+	f.up.Store(true)
+	waitFor(t, c, "model-free backend ready", func(s Status) bool { return s.Ready })
+	if f.gets.Load() != 0 {
+		t.Fatal("model-free workflow downloaded a file")
 	}
 }
