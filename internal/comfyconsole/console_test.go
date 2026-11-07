@@ -368,6 +368,9 @@ func TestConsole_NoModelsStillRequiresHealthyBackend(t *testing.T) {
 	if st.Ready || st.Models.State != StateDone || st.Models.Progress != 1 {
 		t.Fatalf("empty-model status with backend down: %+v", st)
 	}
+	if st.Models.Items == nil {
+		t.Fatal("model-free status must encode items as an empty array for the console UI")
+	}
 	f.up.Store(true)
 	waitFor(t, c, "model-free backend ready", func(s Status) bool { return s.Ready })
 	if f.gets.Load() != 0 {

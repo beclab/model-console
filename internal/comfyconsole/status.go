@@ -39,7 +39,7 @@ type BackendStatus struct {
 // Status snapshots the console.
 func (c *Console) Status() Status {
 	c.mu.Lock()
-	var st Status
+	st := Status{Models: ModelsStatus{Items: []ItemStatus{}}}
 	var have, total int64
 	counts := map[string]int{}
 	for _, it := range c.items {
