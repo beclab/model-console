@@ -87,3 +87,33 @@ func (c *AppConfig) validate() error {
 	}
 	return nil
 }
+
+// UseMirror points every huggingface.co model URL at a Hugging Face mirror
+// (HF_ENDPOINT, e.g. Olares' OLARES_SYSTEM_HUGGINGFACE_SERVICE), keeping the
+// /<repo>/resolve/<rev>/<path> part. It returns how many URLs changed. An
+// empty endpoint, or huggingface.co itself, changes nothing.
+func (c *AppConfig) UseMirror(endpoint string) (int, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return 0, nil
+	}
+	base, err := url.Parse(endpoint)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+		return 0, fmt.Errorf("HF_ENDPOINT %q is not an http(s) URL", endpoint)
+	}
+	if base.Host == "huggingface.co" {
+		return 0, nil
+	}
+	n := 0
+	for i, m := range c.Models {
+		u, err := url.Parse(m.URL)
+		if err != nil || u.Host != "huggingface.co" {
+			continue
+		}
+		u.Scheme, u.Host = base.Scheme, base.Host
+		u.Path = strings.TrimRight(base.Path, "/") + u.Path
+		c.Models[i].URL = u.String()
+		n++
+	}
+	return n, nil
+}

@@ -327,3 +327,26 @@ func TestConsole_ParallelFallsBackWithoutRanges(t *testing.T) {
 		t.Fatalf("fallback produced a bad file: %v", err)
 	}
 }
+
+func TestUseMirror(t *testing.T) {
+	cfg := &AppConfig{Models: []Model{
+		{Name: "a.safetensors", URL: "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/a.safetensors"},
+		{Name: "b.safetensors", URL: "https://example.com/b.safetensors"},
+	}}
+	n, err := cfg.UseMirror("https://hf-mirrors-internal.joinolares.cn/")
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got := cfg.Models[0].URL; got != "https://hf-mirrors-internal.joinolares.cn/Comfy-Org/MiniMax-H3/resolve/main/vae/a.safetensors" {
+		t.Errorf("mirrored URL = %s", got)
+	}
+	if cfg.Models[1].URL != "https://example.com/b.safetensors" {
+		t.Errorf("non-HF URL changed: %s", cfg.Models[1].URL)
+	}
+	if n, _ := cfg.UseMirror("https://huggingface.co"); n != 0 {
+		t.Errorf("huggingface.co endpoint rewrote %d URLs", n)
+	}
+	if _, err := cfg.UseMirror("ftp://x"); err == nil {
+		t.Error("ftp endpoint accepted")
+	}
+}

@@ -19,6 +19,10 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   of 64 MiB or more are fetched over `COMFY_DOWNLOAD_CONNECTIONS` (default 8)
   byte ranges, checkpointed to `<file>.part.json`, since Hugging Face's CDN
   throttles each connection. The LLM mode is untouched.
+- `llm-init comfyui` honours `HF_ENDPOINT`: huggingface.co model URLs are
+  fetched from that mirror instead (same `/<repo>/resolve/<rev>/<path>`), so
+  an Olares with an internal mirror (`OLARES_SYSTEM_HUGGINGFACE_SERVICE`)
+  downloads from it and warms it for other machines.
 
 ### Changed
 

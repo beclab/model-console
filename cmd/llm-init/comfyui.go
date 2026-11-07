@@ -28,6 +28,7 @@ import (
 //	COMFYUI_URL       ComfyUI base URL (default http://127.0.0.1:8188)
 //	PORT              listen port (default 8090)
 //	HF_TOKEN          optional bearer token for huggingface.co downloads
+//	HF_ENDPOINT       optional Hugging Face mirror; huggingface.co model URLs are fetched from it
 //	COMFY_DOWNLOAD_CONNECTIONS  concurrent byte ranges per large model (default 8)
 //	LOG_LEVEL / LOG_FORMAT  as in the LLM mode
 func runComfyUI(getenv config.Getenv, stderr *os.File) int {
@@ -42,6 +43,11 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 
 	cfgFile := env("COMFY_APP_CONFIG", "/etc/comfy-app/app-config.json")
 	cfg, err := comfyconsole.LoadConfig(cfgFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "config error: %v\n", err)
+		return exitConfig
+	}
+	mirrored, err := cfg.UseMirror(env("HF_ENDPOINT", ""))
 	if err != nil {
 		fmt.Fprintf(stderr, "config error: %v\n", err)
 		return exitConfig
@@ -92,7 +98,7 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 		}
 	}()
 	logger.Info("comfyui console started", "version", version.Version, "addr", addr,
-		"config", cfgFile, "models_dir", modelsDir, "models", len(cfg.Models))
+		"config", cfgFile, "models_dir", modelsDir, "models", len(cfg.Models), "hf_mirrored", mirrored)
 
 	console.Run(ctx)
 
