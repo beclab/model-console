@@ -78,6 +78,21 @@ relaunches the API server when Model Console changes engine arguments.
 The NVIDIA manual-test chart and build instructions are in
 [strataqwen38iq4xsv3/README.md](strataqwen38iq4xsv3/README.md).
 
+## ComfyUI workflow sidecar
+
+The ComfyUI feature branch also provides `llm-init comfyui`, a separate mode
+for standalone workflow applications. Set `COMFY_APP_CONFIG` to the shared
+app-config JSON and `COMFY_MODELS_DIR` to the shared model library;
+`COMFYUI_URL` defaults to `http://127.0.0.1:8188`, and `PORT` to `8090`.
+
+The console verifies every configured model and probes ComfyUI. Image and
+video utilities may declare an empty `models` list: no download is needed,
+but the backend must still answer before `/readyz` succeeds. `/api/status`
+always returns `models.items` as an array, including `[]` for these tools,
+and reports model progress as complete when there are no models.
+
+The configuration and status types are in `internal/comfyconsole/`.
+
 ## Development
 
 Go 1.23 or newer is required by the module. The release and security checks use
