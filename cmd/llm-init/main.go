@@ -71,6 +71,9 @@ func run(args []string, stdout, stderr *os.File, getenv config.Getenv) int {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
+	if len(args) > 0 && args[0] == "comfyui" {
+		return runComfyUI(getenv, stderr)
+	}
 
 	fs := flag.NewFlagSet("llm-init", flag.ContinueOnError)
 	fs.SetOutput(stderr)

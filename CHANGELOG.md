@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ## [Unreleased]
 
+### Added
+
+- `llm-init comfyui` runs the Model Console of a single-workflow ComfyUI
+  app. It reads a JSON app config (`COMFY_APP_CONFIG`) listing the models the
+  workflow needs, downloads them into `COMFY_MODELS_DIR` with resume and
+  sha256 verification (a marker under `.llm-init-verified/` skips re-hashing
+  on restart), re-fetches a model that disappears, probes ComfyUI's
+  `GET /system_stats`, and serves `GET /api/status` (ready only when every
+  model is verified and ComfyUI answers) plus a progress page at `/`. Models
+  of 64 MiB or more are fetched over `COMFY_DOWNLOAD_CONNECTIONS` (default 8)
+  byte ranges, checkpointed to `<file>.part.json`, since Hugging Face's CDN
+  throttles each connection. The LLM mode is untouched.
+- `llm-init comfyui` honours `HF_ENDPOINT`: huggingface.co model URLs are
+  fetched from that mirror instead (same `/<repo>/resolve/<rev>/<path>`), so
+  an Olares with an internal mirror (`OLARES_SYSTEM_HUGGINGFACE_SERVICE`)
+  downloads from it and warms it for other machines.
+
 ### Changed
 
 - A chat card whose `max_output_tokens` is unset, or as large as its
