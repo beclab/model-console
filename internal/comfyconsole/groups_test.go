@@ -39,6 +39,9 @@ func newGroupFixture(t *testing.T) *groupFixture {
 		}
 		if name == "slow" {
 			w.Header().Set("Content-Length", strconv.Itoa(len(p)))
+			if r.Method == http.MethodHead {
+				return
+			}
 			_, _ = w.Write(p[:len(p)/2])
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
