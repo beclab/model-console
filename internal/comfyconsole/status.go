@@ -167,16 +167,18 @@ func (c *Console) Handler() http.Handler {
 }
 
 func (c *Console) groupChange(w http.ResponseWriter, err error) {
-	switch {
-	case err == nil:
+	if err == nil {
 		writeJSON(w, http.StatusOK, c.Status())
-	case errors.Is(err, ErrUnknownGroup), errors.Is(err, ErrNoGroups):
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-	case errors.Is(err, ErrLastGroup):
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-	default:
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, ErrUnknownGroup), errors.Is(err, ErrNoGroups):
+		status = http.StatusNotFound
+	case errors.Is(err, ErrLastGroup):
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

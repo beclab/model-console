@@ -10,6 +10,7 @@ import (
 	"strings"
 )
 
+// Errors from AddGroup and RemoveGroup; the HTTP handler maps them to 404 and 409.
 var (
 	ErrNoGroups     = errors.New("this app has no model groups")
 	ErrUnknownGroup = errors.New("unknown model group")
