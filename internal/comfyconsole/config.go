@@ -16,16 +16,31 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 )
 
 // AppConfig is the single source of truth for the app: the workflow the
-// Easy UI submits and the models it needs. The console reads only Models;
-// Workflow is kept raw so the Easy UI owns its schema.
+// Easy UI submits and the models it needs. The console reads only Models
+// and Groups; Workflow is kept raw so the Easy UI owns its schema.
 type AppConfig struct {
 	Workflow json.RawMessage `json:"workflow"`
-	Models   []Model         `json:"models"`
+	// Models are always installed.
+	Models []Model `json:"models"`
+	// Groups are optional model sets on top of Models, e.g. one per
+	// precision; the selection (see LoadSelection) says which are kept.
+	Groups []Group `json:"groups,omitempty"`
 }
+
+// Group is one installable model set. A file may belong to several groups
+// but not to a group and Models.
+type Group struct {
+	ID     string  `json:"id"`
+	Label  string  `json:"label"`
+	Models []Model `json:"models"`
+}
+
+var groupIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 // Model is one weight file. Dir is the ComfyUI model category directory
 // (checkpoints, vae, clip, diffusion_models, ...) relative to the models
@@ -59,31 +74,75 @@ func LoadConfig(file string) (*AppConfig, error) {
 }
 
 func (c *AppConfig) validate() error {
-	if len(c.Models) == 0 {
+	if len(c.Models) == 0 && len(c.Groups) == 0 {
 		return errors.New("models is empty")
 	}
-	seen := make(map[string]bool, len(c.Models))
+	shared := make(map[string]bool, len(c.Models))
 	for i, m := range c.Models {
-		if m.Name == "" || strings.ContainsAny(m.Name, `/\`) || m.Name == "." || m.Name == ".." {
-			return fmt.Errorf("models[%d]: invalid name %q", i, m.Name)
+		if err := m.validate(); err != nil {
+			return fmt.Errorf("models[%d]: %w", i, err)
 		}
-		if m.Dir == "" || path.IsAbs(m.Dir) || path.Clean(m.Dir) != m.Dir || strings.HasPrefix(m.Dir, "..") {
-			return fmt.Errorf("models[%d] %s: dir must be a clean relative path, got %q", i, m.Name, m.Dir)
-		}
-		u, err := url.Parse(m.URL)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-			return fmt.Errorf("models[%d] %s: invalid url %q", i, m.Name, m.URL)
-		}
-		if len(m.SHA256) != 64 {
-			return fmt.Errorf("models[%d] %s: sha256 must be 64 hex chars", i, m.Name)
-		}
-		if m.Size <= 0 {
-			return fmt.Errorf("models[%d] %s: size must be positive", i, m.Name)
-		}
-		if seen[m.RelPath()] {
+		if shared[m.RelPath()] {
 			return fmt.Errorf("models[%d]: duplicate path %s", i, m.RelPath())
 		}
-		seen[m.RelPath()] = true
+		shared[m.RelPath()] = true
+	}
+	ids := map[string]bool{}
+	inGroups := map[string]Model{}
+	for i, g := range c.Groups {
+		if !groupIDRe.MatchString(g.ID) || ids[g.ID] {
+			return fmt.Errorf("groups[%d]: id %q must be unique and match %s", i, g.ID, groupIDRe)
+		}
+		ids[g.ID] = true
+		if len(g.Models) == 0 {
+			return fmt.Errorf("groups[%d] %s: models is empty", i, g.ID)
+		}
+		own := map[string]bool{}
+		for j, m := range g.Models {
+			if err := m.validate(); err != nil {
+				return fmt.Errorf("groups[%d] %s models[%d]: %w", i, g.ID, j, err)
+			}
+			p := m.RelPath()
+			switch prev, ok := inGroups[p]; {
+			case shared[p]:
+				return fmt.Errorf("groups[%d] %s: %s is also in models", i, g.ID, p)
+			case own[p]:
+				return fmt.Errorf("groups[%d] %s: duplicate path %s", i, g.ID, p)
+			case ok && (prev.SHA256 != m.SHA256 || prev.Size != m.Size):
+				return fmt.Errorf("groups[%d] %s: %s differs from another group's file of that path", i, g.ID, p)
+			}
+			own[p] = true
+			inGroups[p] = m
+		}
+	}
+	return nil
+}
+
+func (m Model) validate() error {
+	if m.Name == "" || strings.ContainsAny(m.Name, `/\`) || m.Name == "." || m.Name == ".." {
+		return fmt.Errorf("invalid name %q", m.Name)
+	}
+	if m.Dir == "" || path.IsAbs(m.Dir) || path.Clean(m.Dir) != m.Dir || strings.HasPrefix(m.Dir, "..") {
+		return fmt.Errorf("%s: dir must be a clean relative path, got %q", m.Name, m.Dir)
+	}
+	u, err := url.Parse(m.URL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("%s: invalid url %q", m.Name, m.URL)
+	}
+	if len(m.SHA256) != 64 {
+		return fmt.Errorf("%s: sha256 must be 64 hex chars", m.Name)
+	}
+	if m.Size <= 0 {
+		return fmt.Errorf("%s: size must be positive", m.Name)
+	}
+	return nil
+}
+
+func (c *AppConfig) group(id string) *Group {
+	for i := range c.Groups {
+		if c.Groups[i].ID == id {
+			return &c.Groups[i]
+		}
 	}
 	return nil
 }
@@ -105,15 +164,21 @@ func (c *AppConfig) UseMirror(endpoint string) (int, error) {
 		return 0, nil
 	}
 	n := 0
-	for i, m := range c.Models {
-		u, err := url.Parse(m.URL)
-		if err != nil || u.Host != "huggingface.co" {
-			continue
+	lists := [][]Model{c.Models}
+	for _, g := range c.Groups {
+		lists = append(lists, g.Models)
+	}
+	for _, ms := range lists {
+		for i, m := range ms {
+			u, err := url.Parse(m.URL)
+			if err != nil || u.Host != "huggingface.co" {
+				continue
+			}
+			u.Scheme, u.Host = base.Scheme, base.Host
+			u.Path = strings.TrimRight(base.Path, "/") + u.Path
+			ms[i].URL = u.String()
+			n++
 		}
-		u.Scheme, u.Host = base.Scheme, base.Host
-		u.Path = strings.TrimRight(base.Path, "/") + u.Path
-		c.Models[i].URL = u.String()
-		n++
 	}
 	return n, nil
 }

@@ -48,6 +48,11 @@ type Options struct {
 	Downloader fetch.RangeDownloader
 	Client     *http.Client // for the /system_stats probe
 
+	// Selected are the groups to keep (LoadSelection); SelectionFile is
+	// rewritten when they change.
+	Selected      []string
+	SelectionFile string
+
 	// Models of at least ParallelMin bytes are fetched over Connections
 	// concurrent byte ranges through DownloadClient; smaller ones, or an
 	// upstream without range support, use Downloader.
@@ -65,14 +70,21 @@ type Options struct {
 
 // Console tracks the models and the ComfyUI backend.
 type Console struct {
-	opts    Options
-	mu      sync.Mutex
-	items   []*itemState
+	opts       Options
+	mu         sync.Mutex
+	items      []*itemState
+	selected   map[string]bool
+	passCancel context.CancelFunc
+	// passMu is held while a pass over the models runs, so RemoveGroup can
+	// delete files only once no download writes them.
+	passMu  sync.Mutex
+	kick    chan struct{}
 	backend atomic.Bool
 }
 
 type itemState struct {
 	model      Model
+	groups     []string // empty: shared
 	state      string
 	downloaded int64
 	err        string
@@ -124,9 +136,24 @@ func New(opts Options) *Console {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	c := &Console{opts: opts}
+	c := &Console{opts: opts, selected: map[string]bool{}, kick: make(chan struct{}, 1)}
 	for _, m := range opts.Config.Models {
 		c.items = append(c.items, &itemState{model: m, state: StatePending})
+	}
+	byPath := map[string]*itemState{}
+	for _, g := range opts.Config.Groups {
+		for _, m := range g.Models {
+			it := byPath[m.RelPath()]
+			if it == nil {
+				it = &itemState{model: m, state: StatePending}
+				byPath[m.RelPath()] = it
+				c.items = append(c.items, it)
+			}
+			it.groups = append(it.groups, g.ID)
+		}
+	}
+	for _, id := range opts.Selected {
+		c.selected[id] = true
 	}
 	return c
 }
@@ -169,24 +196,15 @@ func (c *Console) probe(ctx context.Context) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// modelLoop ensures every model in order, then keeps re-checking so a model
-// deleted or moved from the ComfyUI side is fetched again.
+// modelLoop ensures every wanted model in order, then keeps re-checking so
+// a model deleted or moved from the ComfyUI side is fetched again. A group
+// change cancels the pass and starts the next one at once.
 func (c *Console) modelLoop(ctx context.Context) {
 	failures := 0
 	for {
-		failed := false
-		for _, it := range c.items {
-			if ctx.Err() != nil {
-				return
-			}
-			if err := c.ensure(ctx, it); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				failed = true
-				c.opts.Logger.Error("model ensure failed", "model", it.model.RelPath(), "err", err)
-				c.set(it, StateError, -1, err.Error())
-			}
+		failed := c.pass(ctx)
+		if ctx.Err() != nil {
+			return
 		}
 		wait := c.opts.RecheckEvery
 		if failed {
@@ -199,8 +217,40 @@ func (c *Console) modelLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		case <-c.kick:
+			failures = 0
 		}
 	}
+}
+
+func (c *Console) pass(ctx context.Context) (failed bool) {
+	c.passMu.Lock()
+	defer c.passMu.Unlock()
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c.mu.Lock()
+	c.passCancel = cancel
+	c.mu.Unlock()
+	for _, it := range c.items {
+		if pctx.Err() != nil {
+			return failed
+		}
+		c.mu.Lock()
+		want := c.wanted(it)
+		c.mu.Unlock()
+		if !want {
+			continue
+		}
+		if err := c.ensure(pctx, it); err != nil {
+			if pctx.Err() != nil {
+				return failed
+			}
+			failed = true
+			c.opts.Logger.Error("model ensure failed", "model", it.model.RelPath(), "err", err)
+			c.set(it, StateError, -1, err.Error())
+		}
+	}
+	return failed
 }
 
 func (c *Console) ensure(ctx context.Context, it *itemState) error {

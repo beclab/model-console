@@ -30,6 +30,8 @@ import (
 //	HF_TOKEN          optional bearer token for huggingface.co downloads
 //	HF_ENDPOINT       optional Hugging Face mirror; huggingface.co model URLs are fetched from it
 //	COMFY_DOWNLOAD_CONNECTIONS  concurrent byte ranges per large model (default 8)
+//	COMFY_GROUPS      model groups to install first: ids separated by commas, "all", or empty for the first
+//	COMFY_SELECTION_FILE  where the installed groups are kept across restarts (on persistent storage)
 //	LOG_LEVEL / LOG_FORMAT  as in the LLM mode
 func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 	env := func(k, def string) string {
@@ -72,13 +74,22 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 		conns = n
 	}
 
+	selFile := env("COMFY_SELECTION_FILE", "")
+	selected, err := comfyconsole.LoadSelection(cfg, selFile, env("COMFY_GROUPS", ""))
+	if err != nil {
+		fmt.Fprintf(stderr, "config error: %v\n", err)
+		return exitConfig
+	}
+
 	console := comfyconsole.New(comfyconsole.Options{
-		Config:      cfg,
-		ModelsDir:   modelsDir,
-		ComfyURL:    strings.TrimRight(env("COMFYUI_URL", "http://127.0.0.1:8188"), "/"),
-		Headers:     headers,
-		Connections: conns,
-		Logger:      logger,
+		Config:        cfg,
+		ModelsDir:     modelsDir,
+		ComfyURL:      strings.TrimRight(env("COMFYUI_URL", "http://127.0.0.1:8188"), "/"),
+		Headers:       headers,
+		Connections:   conns,
+		Selected:      selected,
+		SelectionFile: selFile,
+		Logger:        logger,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -98,7 +109,7 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 		}
 	}()
 	logger.Info("comfyui console started", "version", version.Version, "addr", addr,
-		"config", cfgFile, "models_dir", modelsDir, "models", len(cfg.Models), "hf_mirrored", mirrored)
+		"config", cfgFile, "models_dir", modelsDir, "models", len(cfg.Models), "groups", selected, "hf_mirrored", mirrored)
 
 	console.Run(ctx)
 

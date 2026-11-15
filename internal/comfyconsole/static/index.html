@@ -22,6 +22,10 @@
   .err { color:var(--bad); font-size:12px; margin-top:6px; word-break:break-all; }
   .pill { font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); }
   .up { color:var(--ok); } .down { color:var(--bad); }
+  h2 { font-size:15px; margin:24px 0 8px; }
+  button { font:inherit; padding:4px 12px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
 </style>
 </head>
 <body>
@@ -32,6 +36,11 @@
     <div class="row"><strong>ComfyUI</strong><span class="pill" id="backend">—</span></div>
     <div class="row" style="margin-top:8px"><span>Models</span><span class="muted" id="total"></span></div>
     <div class="bar" id="totalbar"><i></i></div>
+  </div>
+  <div id="groups-box" hidden>
+    <h2>Model sets</h2>
+    <div id="groups"></div>
+    <h2>Files</h2>
   </div>
   <div id="items"></div>
 </main>
@@ -48,6 +57,7 @@
     document.getElementById("total").textContent = fmt(have) + " / " + fmt(size) + " · " + (m.progress * 100).toFixed(1) + "%";
     const tb = document.getElementById("totalbar");
     tb.firstElementChild.style.width = (m.progress * 100) + "%"; tb.classList.toggle("done", m.state === "done");
+    renderGroups(s);
     const box = document.getElementById("items");
     box.replaceChildren(...m.items.map((i) => {
       const el = document.createElement("div"); el.className = "card";
@@ -60,6 +70,34 @@
       el.querySelector(".bar > i").style.width = pct + "%";
       el.querySelector(".bar").classList.toggle("done", i.state === "done");
       if (i.error) { const e = document.createElement("div"); e.className = "err"; e.textContent = i.error; el.append(e); }
+      return el;
+    }));
+  }
+  async function change(method, g) {
+    if (method === "DELETE" && !confirm("Delete the " + g.label + " files? Files another installed set uses stay. If another app uses the same files, it will download them again.")) return;
+    const r = await fetch("api/groups/" + encodeURIComponent(g.id), { method });
+    if (!r.ok) alert((await r.json().catch(() => ({}))).error || r.statusText);
+    else render(await r.json());
+  }
+  function renderGroups(s) {
+    const gs = s.groups || [];
+    document.getElementById("groups-box").hidden = gs.length === 0;
+    const installed = gs.filter((g) => g.selected).length;
+    document.getElementById("groups").replaceChildren(...gs.map((g) => {
+      const el = document.createElement("div"); el.className = "card";
+      el.innerHTML = '<div class="row"><strong></strong><span><span class="pill"></span> <button type="button"></button></span></div>' +
+        '<div class="muted"></div><div class="bar"><i></i></div>';
+      el.querySelector("strong").textContent = g.label;
+      el.querySelector(".pill").textContent = g.selected ? g.state : "not installed";
+      el.querySelector(".muted").textContent = g.selected ? fmt(g.downloaded) + " / " + fmt(g.size) : fmt(g.size);
+      el.querySelector(".bar > i").style.width = (g.selected ? g.progress * 100 : 0) + "%";
+      el.querySelector(".bar").classList.toggle("done", g.state === "done");
+      const btn = el.querySelector("button");
+      btn.textContent = g.selected ? "Delete" : "Download";
+      btn.className = g.selected ? "danger" : "";
+      btn.disabled = g.selected && installed < 2;
+      btn.title = btn.disabled ? "At least one set stays installed" : "";
+      btn.onclick = () => change(g.selected ? "DELETE" : "PUT", g);
       return el;
     }));
   }
