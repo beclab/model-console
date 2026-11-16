@@ -304,16 +304,28 @@ func writeRewriteTooLarge(w http.ResponseWriter, req *http.Request, observed int
 
 // rewriteJSONModel returns body with body["model"] set to modelName, or
 // (body, false) if body is not a JSON object.
+//
+// Only the top level is decoded. Every other value is carried as
+// json.RawMessage, so the order of keys inside it reaches the engine as the
+// client sent it. Decoding into map[string]any re-encoded the whole body with
+// Go's sorted map keys, which reordered the properties of every tool schema;
+// the chat template renders them in that order, and small models answer
+// differently when it changes (LFM3 1.7B appended a stray "}" to a string
+// argument in 8 of 8 runs with sorted properties, 0 of 8 as sent).
 func rewriteJSONModel(body []byte, modelName string) ([]byte, bool) {
 	trimmed := bytes.TrimLeft(body, " \t\r\n")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return body, false
 	}
-	var obj map[string]any
+	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body, false
 	}
-	obj["model"] = modelName
+	name, err := json.Marshal(modelName)
+	if err != nil {
+		return body, false
+	}
+	obj["model"] = name
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body, false

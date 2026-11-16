@@ -130,6 +130,13 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Fixed
 
+- The OpenAI proxy keeps the key order of the request it forwards. Setting
+  `model` decoded the whole body into a Go map and re-encoded it, which
+  sorted every object's keys, so tool schemas reached the engine with their
+  properties in alphabetical order and the chat template rendered a
+  different prompt than the client sent. Only the top level is decoded now;
+  nested values are forwarded as sent.
+
 - The model card's `extensions.capacity` now follows an engine whose pod an
   upgrade replaced. The capacity reporter re-read the engine only on a
   readiness dip or a relaunch this process asked for, and a replaced pod
