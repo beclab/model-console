@@ -334,10 +334,11 @@ func TestHF_Subprocess_DuplicateBasenameProgress(t *testing.T) {
 	}
 
 	st := mgr.Snapshot()
-	// tqdm's three significant digits round both totals up; what matters
+	// tqdm's three significant digits round both totals up past the
+	// pinned budget, which caps the sum at the Hub's total; what matters
 	// is that the second file contributed at all. It used to contribute
 	// nothing, leaving this at 8480000000.
-	if want := int64(8480000000 + 3780000000); st.BytesCompleted != want {
+	if want := instructSize + redaeSize; st.BytesCompleted != want {
 		t.Errorf("bytes_completed = %d, want %d", st.BytesCompleted, want)
 	}
 	if st.FilesCompleted != 2 {

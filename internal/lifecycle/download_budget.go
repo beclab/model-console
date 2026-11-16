@@ -172,9 +172,6 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 		}
 		if sources[i].Kind == config.KindHF {
 			hfSources = append(hfSources, sources[i])
-			b, n := cachedHFSnapshot(m.hfCacheRoot(), sources[i])
-			out.bytesCached += b
-			out.filesCached += n
 		}
 	}
 
@@ -208,15 +205,13 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 		}
 		out.bytes += est.Bytes
 		out.files += est.Files
-		cached := cachedHFSnapshotFiles(m.hfCacheRoot(), hfSources[i])
 		for _, e := range est.Entries {
 			fp := progress.FileProgress{Path: e.Path, BytesTotal: e.Size, Status: progress.FileWaiting}
-			if n := cached[e.Path]; n > 0 {
+			if hasHFFile(m.hfCacheRoot(), hfSources[i].HFRepo, est.Commit, e) {
 				fp.Status = progress.FileDone
-				fp.BytesCompleted = n
-				if fp.BytesTotal > 0 && fp.BytesCompleted > fp.BytesTotal {
-					fp.BytesCompleted = fp.BytesTotal
-				}
+				fp.BytesCompleted = e.Size
+				out.bytesCached += e.Size
+				out.filesCached++
 			}
 			out.queue = append(out.queue, fp)
 		}
@@ -323,53 +318,47 @@ func regularFileSize(path string) int64 {
 	return info.Size()
 }
 
-// cachedHFSnapshot sums finished snapshot files for an hf:// source
-// using the same include / exclude / subdir rules as EstimateRepo.
-// Hub `.incomplete` blobs are ignored — their names are etag+uuid and
-// are not reliably resumable across hf CLI reruns.
-func cachedHFSnapshot(cacheRoot string, ms config.ModelSource) (bytes int64, files int) {
-	sizes := cachedHFSnapshotFiles(cacheRoot, ms)
-	for _, n := range sizes {
-		bytes += n
-		files++
+// hasHFFile reports whether the content the target commit lists for one
+// file is already in the local cache.
+//
+// The local refs/<revision> is no guide here: it names the snapshot an
+// earlier pass fetched, and when the branch has moved since, that
+// snapshot holds files with the same names and different bytes. Seeding
+// those as done counted the old model toward the new one, and the
+// transfer of the new one on top of that drove bytes_completed past
+// bytes_total. Both checks below are keyed by the target, so an old
+// version never matches:
+//
+//   - snapshots/<commit>/<path> exists only once hf finished that file
+//     for that commit, however it named the blob. Mirrors that omit
+//     X-Linked-ETag (the Olares one) make hf name blobs by the mirror's
+//     ETag, which no Hub id predicts.
+//   - blobs/<id> catches content the target shares with a revision
+//     fetched earlier, which hf skips without linking it in yet.
+//
+// A `<id>.incomplete` partial is not counted: hf resumes it and the
+// first tqdm tick already carries the bytes it holds.
+func hasHFFile(cacheRoot, repo, commit string, e hfwrap.TreeEntry) bool {
+	if hasHFBlob(cacheRoot, repo, e) {
+		return true
 	}
-	return bytes, files
+	if cacheRoot == "" || repo == "" || !isResolvedCommit(commit) || !filepath.IsLocal(filepath.FromSlash(e.Path)) {
+		return false
+	}
+	p := filepath.Join(hfwrap.SnapshotPath(cacheRoot, repo, commit), filepath.FromSlash(e.Path))
+	info, err := os.Stat(p)
+	return err == nil && info.Mode().IsRegular() && info.Size() == e.Size
 }
 
-func cachedHFSnapshotFiles(cacheRoot string, ms config.ModelSource) map[string]int64 {
-	out := make(map[string]int64)
-	if ms.Kind != config.KindHF || ms.HFRepo == "" || cacheRoot == "" {
-		return out
+// hasHFBlob looks the content up under blobs/ by the id the Hub gave it.
+func hasHFBlob(cacheRoot, repo string, e hfwrap.TreeEntry) bool {
+	if cacheRoot == "" || repo == "" || !isHFBlobID(e.BlobID) {
+		return false
 	}
-	sha, err := hfwrap.ReadRefCommit(cacheRoot, ms.HFRepo, ms.HFRevision)
-	if err != nil || sha == "" {
-		return out
-	}
-	snap := hfwrap.SnapshotPath(cacheRoot, ms.HFRepo, sha)
-	_ = filepath.WalkDir(snap, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, rerr := filepath.Rel(snap, p)
-		if rerr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasSuffix(rel, ".incomplete") {
-			return nil
-		}
-		if !hfwrap.UnderSubdir(rel, ms.HFSubdir) {
-			return nil
-		}
-		if !hfwrap.MatchPatterns(rel, ms.HFInclude, ms.HFExclude) {
-			return nil
-		}
-		n := regularFileSize(p)
-		if n <= 0 {
-			return nil
-		}
-		out[rel] = n
-		return nil
-	})
-	return out
+	info, err := os.Stat(filepath.Join(hfwrap.HFRepoCacheDir(cacheRoot, repo), "blobs", e.BlobID))
+	return err == nil && info.Mode().IsRegular() && info.Size() == e.Size
 }
+
+// isHFBlobID accepts the two forms the cache names blobs by, which also
+// keeps an id from a misbehaving endpoint from naming a path elsewhere.
+func isHFBlobID(s string) bool { return isSHA256Hex(s) || isResolvedCommit(s) }

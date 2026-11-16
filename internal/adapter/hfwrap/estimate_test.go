@@ -32,6 +32,34 @@ func TestEstimateRepoFiles_SumsMatchingFiles(t *testing.T) {
 	}
 }
 
+func TestRepoTree_BlobIDFollowsCacheNaming(t *testing.T) {
+	t.Parallel()
+	const lfs = "4f2a8b0e3c1d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"type":"file","path":"model.gguf","size":100,"oid":"1111111111111111111111111111111111111111",
+			 "lfs":{"oid":"` + lfs + `","size":100}},
+			{"type":"file","path":"config.json","size":10,"oid":"2222222222222222222222222222222222222222"}
+		]`))
+	}))
+	defer srv.Close()
+
+	entries, _, err := RepoTree(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries=%+v", entries)
+	}
+	if entries[0].BlobID != lfs || entries[0].SHA256 != lfs {
+		t.Errorf("lfs entry=%+v, want BlobID and SHA256 = lfs oid", entries[0])
+	}
+	if entries[1].BlobID != "2222222222222222222222222222222222222222" || entries[1].SHA256 != "" {
+		t.Errorf("plain entry=%+v, want BlobID = git oid and no SHA256", entries[1])
+	}
+}
+
 func TestEstimateRepo_WholeRepoAndFilters(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -100,6 +128,60 @@ func TestEstimateRepo_WholeRepoAndFilters(t *testing.T) {
 	}
 	if !both.Complete || both.Bytes != 200 || both.Files != 1 {
 		t.Fatalf("glob+exclude+subdir: %+v, want bytes=200 files=1", both)
+	}
+}
+
+func TestEstimateRepo_ListsAtResolvedCommit(t *testing.T) {
+	t.Parallel()
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	var revisionCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/o/r/revision/main":
+			revisionCalls++
+			_, _ = w.Write([]byte(`{"id":"o/r","sha":"` + commit + `"}`))
+		case "/api/models/o/r/tree/" + commit:
+			_, _ = w.Write([]byte(`[{"type":"file","path":"m.gguf","size":9}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	est, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL}, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if est.Commit != commit || est.Bytes != 9 {
+		t.Fatalf("branch: %+v, want commit %s and 9 bytes", est, commit)
+	}
+
+	pinned, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Revision: commit, Endpoint: srv.URL}, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Commit != commit || revisionCalls != 1 {
+		t.Fatalf("pinned: commit=%q revision calls=%d, want %s and no extra call", pinned.Commit, revisionCalls, commit)
+	}
+}
+
+func TestEstimateRepo_UnresolvedRevisionFallsBack(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/models/o/r/tree/main" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`[{"type":"file","path":"m.gguf","size":9}]`))
+	}))
+	t.Cleanup(srv.Close)
+
+	est, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL}, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if est.Commit != "" || est.Bytes != 9 || !est.Complete {
+		t.Fatalf("fallback: %+v, want the branch tree and no commit", est)
 	}
 }
 

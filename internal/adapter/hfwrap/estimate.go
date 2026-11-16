@@ -24,6 +24,9 @@ type RepoEstimate struct {
 	// Entries is each matched file, in tree order. Used to seed the
 	// dashboard file list before the first transfer starts.
 	Entries []TreeEntry
+	// Commit is the commit Entries were listed at, or "" when the
+	// endpoint would not resolve the revision.
+	Commit string
 }
 
 // EstimateRepo sums remote sizes for the files an hf:// source will
@@ -34,6 +37,13 @@ func EstimateRepo(ctx context.Context, cfg Config, include, exclude []string, su
 	var zero RepoEstimate
 	if cfg.Repo == "" {
 		return zero, nil
+	}
+	// Listing at the resolved commit rather than the branch keeps
+	// Entries and Commit describing the same revision. Neither the Hub
+	// nor the Olares mirror puts X-Repo-Commit on tree responses.
+	commit, rerr := ResolveCommit(ctx, cfg)
+	if rerr == nil {
+		cfg.Revision = commit
 	}
 	entries, _, err := fetchTree(ctx, cfg, true)
 	if err != nil {
@@ -63,7 +73,35 @@ func EstimateRepo(ctx context.Context, cfg Config, include, exclude []string, su
 		Files:    len(matched),
 		Complete: bytes > 0 && everyExactIncludeMatched(include, matched),
 		Entries:  matched,
+		Commit:   commit,
 	}, nil
+}
+
+// ResolveCommit returns the commit cfg.Revision names on the Hub now. A
+// revision that already is a full commit is returned without a request.
+func ResolveCommit(ctx context.Context, cfg Config) (string, error) {
+	if isHexSHA(cfg.Revision) {
+		return cfg.Revision, nil
+	}
+	endpoint := strings.TrimSuffix(cfg.Endpoint, "/")
+	if endpoint == "" {
+		endpoint = "https://huggingface.co"
+	}
+	rev := cfg.Revision
+	if rev == "" {
+		rev = defaultHFRef
+	}
+	apiURL := fmt.Sprintf("%s/api/models/%s/revision/%s", endpoint, cfg.Repo, url.PathEscape(rev))
+	var info struct {
+		SHA string `json:"sha"`
+	}
+	if _, err := getTreePage(ctx, &http.Client{Timeout: httpTimeout}, cfg.Token, apiURL, &info); err != nil {
+		return "", err
+	}
+	if !isHexSHA(info.SHA) {
+		return "", fmt.Errorf("hfwrap revision: %s resolved to %q", rev, info.SHA)
+	}
+	return info.SHA, nil
 }
 
 func everyExactIncludeMatched(include []string, matched []TreeEntry) bool {
@@ -119,6 +157,12 @@ type TreeEntry struct {
 	// leave this empty; the Hub only offers their git blob id, which is
 	// a sha1 over different bytes and no use as a content digest.
 	SHA256 string
+	// BlobID is the name the local HF cache files this content under in
+	// blobs/: the LFS sha256 when there is one, the git blob id
+	// otherwise. Two revisions share a blob exactly when they share
+	// this id, so it says whether a file is already on disk without
+	// reading it.
+	BlobID string
 }
 
 // RepoTree lists what the Hub serves for a revision, and the commit that
@@ -178,9 +222,10 @@ func fetchTree(ctx context.Context, cfg Config, recursive bool) (entries []TreeE
 			if e.Type != "" && e.Type != "file" {
 				continue
 			}
-			te := TreeEntry{Path: e.Path, Size: e.Size}
+			te := TreeEntry{Path: e.Path, Size: e.Size, BlobID: e.OID}
 			if e.LFS != nil {
 				te.SHA256 = e.LFS.OID
+				te.BlobID = e.LFS.OID
 			}
 			entries = append(entries, te)
 		}
@@ -204,6 +249,7 @@ type treeItem struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`
 	Type string `json:"type"`
+	OID  string `json:"oid"`
 	LFS  *struct {
 		OID string `json:"oid"`
 	} `json:"lfs"`

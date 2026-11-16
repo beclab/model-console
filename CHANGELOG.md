@@ -130,6 +130,21 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Fixed
 
+- An hf:// download whose branch moved since the cache was filled no longer
+  starts at 100% and climbs past it. The budget seeded `bytes_completed`
+  from the snapshot the local `refs/<revision>` still named, matching files
+  by name, so an image shipping the old model counted every old file as done
+  and the transfer of the new one stacked on top: a Qwen3.8-27B upgrade read
+  "36 GB of 18 GB" while still downloading. The tree is now listed at the
+  commit the revision resolves to, and a file counts as on disk only when
+  `snapshots/<that commit>/<path>` or `blobs/<id>` (the LFS sha256, or the
+  git blob id for small files) holds it at the listed size. The snapshot
+  check is what works behind mirrors that omit `X-Linked-ETag`, such as the
+  Olares one, where hf names blobs by the mirror's ETag. A new version
+  already in the cache is still reused, partial `.incomplete` blobs are
+  still left to tqdm, and no file is hashed. With the total pinned, `bytes_completed` is also capped at
+  `bytes_total`, with one warning per pass if a producer overruns it.
+
 - The model card's `extensions.capacity` now follows an engine whose pod an
   upgrade replaced. The capacity reporter re-read the engine only on a
   readiness dip or a relaunch this process asked for, and a replaced pod
