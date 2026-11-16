@@ -806,6 +806,41 @@ func TestRewriteJSONModel(t *testing.T) {
 	}
 }
 
+// The engine renders tool schemas in the order their keys arrive, so the
+// rewrite must leave every value below the top level byte-for-byte in place.
+func TestRewriteJSONModel_KeepsNestedKeyOrder(t *testing.T) {
+	t.Parallel()
+	tools := `[{"type":"function","function":{"name":"edit","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}}}]`
+	messages := `[{"role":"user","content":"replace <parameter=limit>40</parameter> & keep \u00e9"}]`
+	body := []byte(`{"model":"alias","tools":` + tools + `,"messages":` + messages + `,"temperature":0}`)
+	out, ok := rewriteJSONModel(body, "Owner/Repo:Q8_0")
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v\n%s", err, out)
+	}
+	if string(got["model"]) != `"Owner/Repo:Q8_0"` {
+		t.Errorf("model = %s", got["model"])
+	}
+	props := string(got["tools"])
+	i, j, k := strings.Index(props, `"path"`), strings.Index(props, `"old_string"`), strings.Index(props, `"new_string"`)
+	if i < 0 || !(i < j && j < k) {
+		t.Errorf("tool properties reordered: %s", props)
+	}
+	var before, after []map[string]string
+	if err := json.Unmarshal([]byte(messages), &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(got["messages"], &after); err != nil {
+		t.Fatal(err)
+	}
+	if before[0]["content"] != after[0]["content"] {
+		t.Errorf("message content changed: %q -> %q", before[0]["content"], after[0]["content"])
+	}
+}
+
 func TestStripAuthorization(t *testing.T) {
 	t.Parallel()
 	h := http.Header{}
