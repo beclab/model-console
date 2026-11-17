@@ -197,6 +197,11 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   found still loading the previous model is restarted within the same
   pass. A build without `model_path` in `/props` is called ready after
   about 10s of unanswered queries.
+- The OpenWebUI alias `/api/chat/completions` now reaches vLLM, llama.cpp
+  and SGLang as `/v1/chat/completions`. It was forwarded as is, and none of
+  them serves that path, so llama.cpp answered 404 "File Not Found". The
+  compat suite that covers it had been skipping on main, its compose stack
+  never coming up.
 - With no pinned total, files already on disk now count toward the overall
   progress as well as their own rows. A cached projector of 100 bytes plus
   500 downloaded of the main file read 500 overall against rows adding up

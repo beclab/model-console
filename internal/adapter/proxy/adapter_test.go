@@ -434,6 +434,9 @@ func TestProxy_VisionBodyForwarded(t *testing.T) {
 			if len(u.gotRequests) != 1 {
 				t.Fatalf("upstream requests = %d, want 1 (body was not forwarded)", len(u.gotRequests))
 			}
+			if got := u.gotRequests[0].path; got != "/v1/chat/completions" {
+				t.Errorf("upstream path = %q, want /v1/chat/completions (no engine serves the alias)", got)
+			}
 			var obj struct {
 				Model string `json:"model"`
 			}

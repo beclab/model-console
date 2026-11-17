@@ -133,9 +133,16 @@ func writeEngineNotListening(w http.ResponseWriter, err error) {
 // director runs in the reverse-proxy hot path: it rewrites Host /
 // Scheme so the request is sent to cfg.Engine.URL, drops the
 // Authorization header, and rewrites the JSON model field.
+//
+// The OpenWebUI alias is sent on as /v1/chat/completions: it is
+// llm-init's route, and none of vLLM, llama.cpp or SGLang serves it.
 func (a *Adapter) director(req *http.Request) {
 	req.URL.Scheme = a.target.Scheme
 	req.URL.Host = a.target.Host
+	if req.URL.Path == pathAPIChatCompletions {
+		req.URL.Path = pathChatCompletions
+		req.URL.RawPath = ""
+	}
 	// Preserve the full inbound path/query as the upstream path. Don't
 	// prepend a.target.Path because the engines mount /v1 at root and
 	// dataplane.Mount routes /v1 in.
