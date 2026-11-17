@@ -241,6 +241,16 @@ type ModelInstaller interface {
 	Register(ctx context.Context, files []string, known map[string]string, sink progress.Sink) error
 }
 
+// ServedModelReporter is an engine that can say which model file it has
+// loaded. llama.cpp reports it in /props. The path is the engine's own,
+// so it is in the namespace the run dir's model_path is written for.
+type ServedModelReporter interface {
+	// ServedModelPath returns the main model file the running engine
+	// loaded. An error means the engine could not answer (down, still
+	// loading, or an older build), not that it serves nothing.
+	ServedModelPath(ctx context.Context) (string, error)
+}
+
 // InstallerFor resolves the installer once, here, so no caller has to
 // ask an Adapter what else it might be. An engine with nothing to
 // install gets one that does nothing, rather than a nil to check at

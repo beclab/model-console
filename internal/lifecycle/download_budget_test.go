@@ -191,58 +191,62 @@ func TestCachedURLResumeBytes_URLAndOllamaURL(t *testing.T) {
 	}
 }
 
-func TestCachedHFBytes_FinishedSnapshotOnly(t *testing.T) {
+func TestHasHFBlob(t *testing.T) {
 	t.Parallel()
-	cache := t.TempDir()
 	repo := "owner/repo"
-	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	refs := filepath.Join(hfwrap.HFRepoCacheDir(cache, repo), "refs")
-	if err := os.MkdirAll(refs, 0o755); err != nil {
-		t.Fatal(err)
+	cache, _ := writeHFBlobs(t, repo, map[string]int{
+		blobA:                 2500,
+		gitOID1:               10,
+		blobB + ".incomplete": 9999,
+	})
+	cases := []struct {
+		name string
+		e    hfwrap.TreeEntry
+		want bool
+	}{
+		{"lfs blob present", hfwrap.TreeEntry{Path: "model.gguf", Size: 2500, BlobID: blobA}, true},
+		{"git blob present", hfwrap.TreeEntry{Path: "config.json", Size: 10, BlobID: gitOID1}, true},
+		{"size differs", hfwrap.TreeEntry{Path: "model.gguf", Size: 2600, BlobID: blobA}, false},
+		{"only a partial", hfwrap.TreeEntry{Path: "model.gguf", Size: 9999, BlobID: blobB}, false},
+		{"absent", hfwrap.TreeEntry{Path: "model.gguf", Size: 2500, BlobID: blobC}, false},
+		{"no id", hfwrap.TreeEntry{Path: "model.gguf", Size: 2500}, false},
+		{"id names a path", hfwrap.TreeEntry{Path: "x", Size: 0, BlobID: "../refs"}, false},
 	}
-	if err := os.WriteFile(filepath.Join(refs, "main"), []byte(sha+"\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, tc := range cases {
+		if got := hasHFBlob(cache, repo, tc.e); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
 	}
-	snap := hfwrap.SnapshotPath(cache, repo, sha)
-	if err := os.MkdirAll(snap, 0o755); err != nil {
-		t.Fatal(err)
+	if hasHFBlob("", repo, cases[0].e) {
+		t.Error("empty cache root must report nothing cached")
 	}
-	file := filepath.Join(snap, "model.gguf")
-	if err := os.WriteFile(file, make([]byte, 2500), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Orphan incomplete must not inflate the seed.
-	blobs := filepath.Join(hfwrap.HFRepoCacheDir(cache, repo), "blobs")
-	if err := os.MkdirAll(blobs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(blobs, "deadbeef.uuid.incomplete"), make([]byte, 9999), 0o644); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	ms := config.ModelSource{
-		Kind:       config.KindHF,
-		HFRepo:     repo,
-		HFRevision: "main",
-		HFInclude:  []string{"model.gguf"},
+func TestHasHFFile_TargetSnapshot(t *testing.T) {
+	t.Parallel()
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	repo := "owner/repo"
+	cache := t.TempDir()
+	writeSnapshotAt(t, cache, repo, commit, map[string]int{"model.gguf": 2500, "sub/a.json": 7})
+	writeBlobsInto(t, cache, repo, map[string]int{"refs-escape": 1})
+	cases := []struct {
+		name   string
+		commit string
+		e      hfwrap.TreeEntry
+		want   bool
+	}{
+		{"in target snapshot", commit, hfwrap.TreeEntry{Path: "model.gguf", Size: 2500, BlobID: blobC}, true},
+		{"nested path", commit, hfwrap.TreeEntry{Path: "sub/a.json", Size: 7}, true},
+		{"size differs", commit, hfwrap.TreeEntry{Path: "model.gguf", Size: 2600}, false},
+		{"other commit", "1111111111111111111111111111111111111111", hfwrap.TreeEntry{Path: "model.gguf", Size: 2500}, false},
+		{"no commit", "", hfwrap.TreeEntry{Path: "model.gguf", Size: 2500}, false},
+		{"branch name", "main", hfwrap.TreeEntry{Path: "model.gguf", Size: 2500}, false},
+		{"path escapes", commit, hfwrap.TreeEntry{Path: "../../blobs/refs-escape", Size: 1}, false},
 	}
-	if got, n := cachedHFSnapshot(cache, ms); got != 2500 || n != 1 {
-		t.Errorf("finished snapshot: got %d/%d want 2500/1", got, n)
-	}
-
-	ms.HFInclude = []string{"*.gguf"}
-	if got, n := cachedHFSnapshot(cache, ms); got != 2500 || n != 1 {
-		t.Errorf("glob include: got %d/%d want 2500/1", got, n)
-	}
-
-	ms.HFInclude = nil
-	if got, n := cachedHFSnapshot(cache, ms); got != 2500 || n != 1 {
-		t.Errorf("whole repo: got %d/%d want 2500/1", got, n)
-	}
-
-	ms.HFInclude = []string{"missing.gguf"}
-	if got, n := cachedHFSnapshot(cache, ms); got != 0 || n != 0 {
-		t.Errorf("missing file: got %d/%d want 0/0", got, n)
+	for _, tc := range cases {
+		if got := hasHFFile(cache, repo, tc.commit, tc.e); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -253,36 +257,6 @@ func TestSeedCompletedForPass_ForceDropsResumeBytes(t *testing.T) {
 	}
 	if got := seedCompletedForPass(true, 800); got != 0 {
 		t.Errorf("force=true: got %d want 0", got)
-	}
-}
-
-func TestCachedHFBytes_Subdir(t *testing.T) {
-	t.Parallel()
-	cache := t.TempDir()
-	repo := "org/embed"
-	sha := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	refs := filepath.Join(hfwrap.HFRepoCacheDir(cache, repo), "refs")
-	if err := os.MkdirAll(refs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(refs, "main"), []byte(sha), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	snap := filepath.Join(hfwrap.SnapshotPath(cache, repo, sha), "onnx")
-	if err := os.MkdirAll(snap, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(snap, "model.onnx"), make([]byte, 120), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ms := config.ModelSource{
-		Kind:      config.KindHF,
-		HFRepo:    repo,
-		HFInclude: []string{"model.onnx"},
-		HFSubdir:  "onnx",
-	}
-	if got, n := cachedHFSnapshot(cache, ms); got != 120 || n != 1 {
-		t.Errorf("subdir snapshot: got %d/%d want 120/1", got, n)
 	}
 }
 

@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -29,6 +32,34 @@ func TestEstimateRepoFiles_SumsMatchingFiles(t *testing.T) {
 	}
 	if !allMatched || total != 150 {
 		t.Fatalf("total=%d allMatched=%v, want 150 true", total, allMatched)
+	}
+}
+
+func TestRepoTree_BlobIDFollowsCacheNaming(t *testing.T) {
+	t.Parallel()
+	const lfs = "4f2a8b0e3c1d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[
+			{"type":"file","path":"model.gguf","size":100,"oid":"1111111111111111111111111111111111111111",
+			 "lfs":{"oid":"` + lfs + `","size":100}},
+			{"type":"file","path":"config.json","size":10,"oid":"2222222222222222222222222222222222222222"}
+		]`))
+	}))
+	defer srv.Close()
+
+	entries, _, err := RepoTree(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries=%+v", entries)
+	}
+	if entries[0].BlobID != lfs || entries[0].SHA256 != lfs {
+		t.Errorf("lfs entry=%+v, want BlobID and SHA256 = lfs oid", entries[0])
+	}
+	if entries[1].BlobID != "2222222222222222222222222222222222222222" || entries[1].SHA256 != "" {
+		t.Errorf("plain entry=%+v, want BlobID = git oid and no SHA256", entries[1])
 	}
 }
 
@@ -100,6 +131,195 @@ func TestEstimateRepo_WholeRepoAndFilters(t *testing.T) {
 	}
 	if !both.Complete || both.Bytes != 200 || both.Files != 1 {
 		t.Fatalf("glob+exclude+subdir: %+v, want bytes=200 files=1", both)
+	}
+}
+
+func TestResolveCommit(t *testing.T) {
+	t.Parallel()
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.Path {
+		case "/api/models/o/r/revision/main":
+			_, _ = w.Write([]byte(`{"id":"o/r","sha":"` + commit + `"}`))
+		case "/api/models/o/r/revision/bad":
+			_, _ = w.Write([]byte(`{"sha":"../../x"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+
+	if got, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL}); err != nil || got != commit {
+		t.Fatalf("branch: %q %v, want %s", got, err, commit)
+	}
+	if got, err := ResolveCommit(ctx, Config{Repo: "o/r", Revision: commit, Endpoint: srv.URL}); err != nil || got != commit || calls != 1 {
+		t.Fatalf("pinned: %q %v calls=%d, want %s and no request", got, err, calls, commit)
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Revision: "bad", Endpoint: srv.URL}); err == nil {
+		t.Error("a non-commit sha must be an error")
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Revision: "gone", Endpoint: srv.URL}); err == nil {
+		t.Error("a missing revision API must be an error")
+	}
+}
+
+// The Olares mirror has refused the revision API while serving the
+// file HEAD hf makes; the lookup must agree with what hf would see.
+func TestResolveCommit_FallsBackToFileHead(t *testing.T) {
+	t.Parallel()
+	const commit = "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/models/o/r/revision/main":
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		case r.Method == http.MethodHead && r.URL.Path == "/o/r/resolve/main/dir/m.gguf":
+			w.Header().Set("X-Repo-Commit", commit)
+			w.Header().Set("Location", "/cdn/blob")
+			w.WriteHeader(http.StatusFound)
+		case r.Method == http.MethodHead && r.URL.Path == "/o/r/resolve/main/nocommit.gguf":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+
+	if got, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL, HFFile: "dir/m.gguf"}); err != nil || got != commit {
+		t.Fatalf("head fallback: %q %v, want %s", got, err, commit)
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL}); err == nil {
+		t.Error("with no file to HEAD, a refused revision API must be an error")
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL, HFFile: "nocommit.gguf"}); err == nil {
+		t.Error("a HEAD without X-Repo-Commit must be an error")
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL, HFFile: "*.gguf"}); err == nil {
+		t.Error("a glob names no file to HEAD")
+	}
+}
+
+func TestHeadFile(t *testing.T) {
+	t.Parallel()
+	const (
+		commit = "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+		lfs    = "2a5f3565f39cf885103da591182c1266da64745737b42b452fd3e675369f1211"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Repo-Commit", commit)
+		switch r.URL.Path {
+		case "/hub/r/resolve/main/m.gguf":
+			w.Header().Set("X-Linked-Size", "17659407264")
+			w.Header().Set("X-Linked-ETag", `"`+lfs+`"`)
+			w.Header().Set("Location", "/cdn")
+			w.WriteHeader(http.StatusFound)
+		case "/mirror/r/resolve/main/m.gguf":
+			w.Header().Set("ETag", `"cea1c0a4a12e28b117e5137684d9fe85-10"`)
+			w.Header().Set("Content-Length", "17659407264")
+		case "/bare/r/resolve/main/m.gguf":
+			w.Header().Set("Location", "/cdn")
+			w.WriteHeader(http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+
+	hub, err := HeadFile(ctx, Config{Repo: "hub/r", Endpoint: srv.URL, HFFile: "m.gguf"})
+	if err != nil || hub.Commit != commit || hub.Entry.Size != 17659407264 || hub.Entry.BlobID != lfs || hub.Entry.SHA256 != lfs {
+		t.Errorf("hub redirect: %+v %v", hub, err)
+	}
+	mirror, err := HeadFile(ctx, Config{Repo: "mirror/r", Endpoint: srv.URL, HFFile: "m.gguf"})
+	if err != nil || mirror.Commit != commit || mirror.Entry.Size != 17659407264 || mirror.Entry.BlobID != "" {
+		t.Errorf("mirror 200: %+v %v, want the size and no blob id", mirror, err)
+	}
+	bare, err := HeadFile(ctx, Config{Repo: "bare/r", Endpoint: srv.URL, HFFile: "m.gguf"})
+	if err != nil || bare.Entry.Size != 0 {
+		t.Errorf("a redirect's own length is not the file's: %+v %v", bare, err)
+	}
+	if _, err := HeadFile(ctx, Config{Repo: "hub/r", Endpoint: srv.URL, HFFile: "*.gguf"}); err == nil {
+		t.Error("a glob names no file to HEAD")
+	}
+}
+
+func TestEstimateRepo_CommitOnlyWhenListedAtOne(t *testing.T) {
+	t.Parallel()
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/o/r/tree/main", "/api/models/o/r/tree/" + commit:
+			_, _ = w.Write([]byte(`[{"type":"file","path":"m.gguf","size":9}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	at, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Revision: commit, Endpoint: srv.URL}, nil, nil, "")
+	if err != nil || at.Commit != commit || at.Bytes != 9 {
+		t.Fatalf("at commit: %+v %v", at, err)
+	}
+	branch, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL}, nil, nil, "")
+	if err != nil || branch.Commit != "" || branch.Bytes != 9 {
+		t.Fatalf("branch: %+v %v, want no commit", branch, err)
+	}
+}
+
+func TestWriteRefCommit(t *testing.T) {
+	t.Parallel()
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	cache := t.TempDir()
+	for _, ref := range []string{"", "v1.0", "refs/pr/1"} {
+		if err := WriteRefCommit(cache, "o/r", ref, commit); err != nil {
+			t.Fatalf("ref %q: %v", ref, err)
+		}
+		if got, err := ReadRefCommit(cache, "o/r", ref); err != nil || got != commit {
+			t.Errorf("ref %q read back %q %v", ref, got, err)
+		}
+	}
+	if err := WriteRefCommit(cache, "o/r", "../../escape", commit); err == nil {
+		t.Error("a ref leaving refs/ must be refused")
+	}
+	if err := WriteRefCommit(cache, "o/r", "main", "not-a-commit"); err == nil {
+		t.Error("a non-commit must be refused")
+	}
+	if err := WriteRefCommit(cache, "o/r", commit, commit); err != nil {
+		t.Errorf("a commit revision needs no ref: %v", err)
+	}
+}
+
+func TestWriteRefCommit_ReadableByOtherUsers(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	cache := t.TempDir()
+	refs := filepath.Join(HFRepoCacheDir(cache, "o/r"), "refs")
+
+	if err := WriteRefCommit(cache, "o/r", "main", commit); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(refs, "main")); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("new ref mode = %v (%v), want 0644", info.Mode().Perm(), err)
+	}
+
+	existing := filepath.Join(refs, "v1")
+	if err := os.WriteFile(existing, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(existing, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRefCommit(cache, "o/r", "v1", commit); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(existing); err != nil || info.Mode().Perm() != 0o664 {
+		t.Fatalf("overwritten ref mode = %v (%v), want the existing 0664", info.Mode().Perm(), err)
 	}
 }
 

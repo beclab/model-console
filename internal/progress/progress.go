@@ -220,6 +220,13 @@ type Manager interface {
 	// While active, Sink.OnFileStart does not grow bytes_total.
 	SeedDownloadBudget(total, completed int64)
 
+	// SeedCachedBytes counts bytes already on disk when the pass total is
+	// unknown: bytes_completed and bytes_total both start at bytes, and
+	// nothing is pinned, so OnFileStart still adds each file that
+	// transfers. A file already on disk never starts, so seeding
+	// bytes_completed alone would end the pass above 100%.
+	SeedCachedBytes(bytes int64)
+
 	// SeedDownloadFiles pins files_total and optional files_completed
 	// (finished HF snapshot files) for a multi-file pass. While active,
 	// OnFileStart does not grow files_total. OnFilesTotal never shrinks
@@ -326,6 +333,8 @@ type memoryManager struct {
 	// bytesBudgetActive: OnFileStart must not add to BytesTotal (set by
 	// SeedDownloadBudget for multi-file passes).
 	bytesBudgetActive bool
+	// overrunLogged keeps addCompleted to one warning per pinned pass.
+	overrunLogged bool
 	// filesBudgetActive: OnFileStart must not raise FilesTotal
 	// (set only by SeedDownloadFiles). OnFilesTotal never sets this:
 	// a CLI "Fetching N files" is one batch, not the whole pass.
@@ -483,7 +492,23 @@ func (m *memoryManager) SeedDownloadBudget(total, completed int64) {
 	})
 	m.mu.Lock()
 	m.bytesBudgetActive = total > 0
+	m.overrunLogged = false
 	m.lastBytes = completed
+	m.mu.Unlock()
+}
+
+func (m *memoryManager) SeedCachedBytes(bytes int64) {
+	if bytes < 0 {
+		bytes = 0
+	}
+	m.Update(func(st *State) {
+		st.BytesTotal = bytes
+		st.BytesCompleted = bytes
+	})
+	m.mu.Lock()
+	m.bytesBudgetActive = false
+	m.overrunLogged = false
+	m.lastBytes = bytes
 	m.mu.Unlock()
 }
 
@@ -540,6 +565,7 @@ func (m *memoryManager) SeedDownloadFiles(total, completed int) {
 func (m *memoryManager) ClearDownloadBudget() {
 	m.mu.Lock()
 	m.bytesBudgetActive = false
+	m.overrunLogged = false
 	m.filesBudgetActive = false
 	m.seenFiles = make(map[string]struct{})
 	m.doneFiles = make(map[string]struct{})

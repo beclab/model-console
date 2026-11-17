@@ -133,9 +133,16 @@ func writeEngineNotListening(w http.ResponseWriter, err error) {
 // director runs in the reverse-proxy hot path: it rewrites Host /
 // Scheme so the request is sent to cfg.Engine.URL, drops the
 // Authorization header, and rewrites the JSON model field.
+//
+// The OpenWebUI alias is sent on as /v1/chat/completions: it is
+// llm-init's route, and none of vLLM, llama.cpp or SGLang serves it.
 func (a *Adapter) director(req *http.Request) {
 	req.URL.Scheme = a.target.Scheme
 	req.URL.Host = a.target.Host
+	if req.URL.Path == pathAPIChatCompletions {
+		req.URL.Path = pathChatCompletions
+		req.URL.RawPath = ""
+	}
 	// Preserve the full inbound path/query as the upstream path. Don't
 	// prepend a.target.Path because the engines mount /v1 at root and
 	// dataplane.Mount routes /v1 in.
@@ -223,6 +230,38 @@ func (a *Adapter) Ready(ctx context.Context) (adapter.ReadyState, error) {
 		}
 	}
 	return adapter.ReadyState{Alive: true, ModelExists: exists}, nil
+}
+
+// ServedModelPath reads model_path from llama.cpp's /props. Engines
+// that do not report it return an error, which callers read as unknown.
+func (a *Adapter) ServedModelPath(ctx context.Context) (string, error) {
+	if a.kind != config.EngineLlamaCpp {
+		return "", fmt.Errorf("proxy: %s does not report its model path", a.kind)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, joinPath(a.cfg.Engine.URL, "/props"), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("proxy: GET /props status %d", resp.StatusCode)
+	}
+	var body struct {
+		ModelPath string `json:"model_path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("proxy: decode /props: %w", err)
+	}
+	if body.ModelPath == "" {
+		return "", errors.New("proxy: /props has no model_path")
+	}
+	return body.ModelPath, nil
 }
 
 // These adapters install nothing, so they do not implement

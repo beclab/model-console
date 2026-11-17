@@ -2,9 +2,12 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/llm-init/llm-init/internal/adapter/hfwrap"
 	"github.com/llm-init/llm-init/internal/config"
@@ -37,10 +40,21 @@ type passState struct {
 	// repository file rather than after the file name it shares with
 	// its namesakes in other directories.
 	hfTrees map[int][]hfwrap.TreeEntry
+	// hfCommits is the commit each hf:// source's revision resolved to
+	// while the budget was estimated, by segment index. runHF downloads
+	// at it, so the progress seeded from that commit's listing describes
+	// the bytes hf fetches even if the branch moves in between.
+	hfCommits map[int]string
 	// driftNotes is one remote verdict per source, and driftNote is
 	// what they last rendered to. See Manager.setDriftNote.
 	driftNotes map[string]string
 	driftNote  string
+	// prevModel is what the run dir told the engine to load when the
+	// pass began. See Manager.relaunchIfModelChanged.
+	prevModel string
+	// relaunched is set once this pass restarted the engine, so it is
+	// not restarted again when it comes back on another model.
+	relaunched bool
 }
 
 // hfTree returns the listing recorded for one source, or nil when the
@@ -50,6 +64,15 @@ func (p *passState) hfTree(ms config.ModelSource) []hfwrap.TreeEntry {
 		return nil
 	}
 	return p.hfTrees[ms.Index]
+}
+
+// hfCommit returns the commit recorded for one source, or "" when its
+// revision was not resolved.
+func (p *passState) hfCommit(ms config.ModelSource) string {
+	if p == nil {
+		return ""
+	}
+	return p.hfCommits[ms.Index]
 }
 
 // enterDownloadPhase moves the pass into phase=download and pins the
@@ -79,8 +102,18 @@ func (m *Manager) enterDownloadPhase(ctx context.Context) {
 	}
 	p.entered = true
 	m.setPhase(progress.PhaseDownload)
-	b := m.estimateDownloadBudget(ctx, p.cfg, p.main, p.mmproj, p.extras)
+	budgetCtx, cancel := ctx, context.CancelFunc(func() {})
+	if m.opts.MetadataBudget > 0 {
+		budgetCtx, cancel = context.WithTimeout(ctx, m.opts.MetadataBudget)
+	}
+	b := m.estimateDownloadBudget(budgetCtx, p.cfg, p.main, p.mmproj, p.extras)
+	if errors.Is(budgetCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		slog.Warn("download metadata lookups ran past their budget; downloading with what they found",
+			slog.Duration("budget", m.opts.MetadataBudget))
+	}
+	cancel()
 	p.hfTrees = b.trees
+	p.hfCommits = b.commits
 	if b.canPin && b.bytes > 0 {
 		m.opts.Manager.SeedDownloadBudget(b.bytes, seedCompletedForPass(p.force, b.bytesCached))
 		if queue := fileListForPass(p.force, b.queue); len(queue) > 0 {
@@ -88,7 +121,21 @@ func (m *Manager) enterDownloadPhase(ctx context.Context) {
 		} else if b.files > 0 {
 			m.opts.Manager.SeedDownloadFiles(b.files, seedCompletedFiles(p.force, b.filesCached))
 		}
+	} else if queue := fileListForPass(p.force, b.queue); len(queue) > 0 {
+		m.opts.Manager.SeedCachedBytes(cachedRowBytes(queue))
+		m.opts.Manager.SeedDownloadFileList(queue)
 	}
+}
+
+// cachedRowBytes is what the rows already on disk hold.
+func cachedRowBytes(queue []progress.FileProgress) int64 {
+	var n int64
+	for _, f := range queue {
+		if f.Status == progress.FileDone {
+			n += f.BytesCompleted
+		}
+	}
+	return n
 }
 
 func fileListForPass(force bool, queue []progress.FileProgress) []progress.FileProgress {
@@ -133,6 +180,8 @@ type downloadBudget struct {
 	// survives the early returns that give up on pinning a denominator:
 	// naming a tqdm bar needs the listing, not a complete estimate.
 	trees map[int][]hfwrap.TreeEntry
+	// commits is the resolved commit per hf:// source, by segment index.
+	commits map[int]string
 }
 
 // estimateDownloadBudget sums what this pass will fetch across every
@@ -152,9 +201,13 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 	if main != nil {
 		sources = append(sources, *main)
 	}
+	// Resolved ahead of everything that can give up on the estimate:
+	// runHF needs the commit whether or not a denominator gets pinned.
+	targets := m.resolveHFTargets(ctx, cfg, sources)
+	out.commits = commitsOf(targets)
 	for i := range sources {
 		if sources[i].Kind == config.KindOllama {
-			return downloadBudget{}
+			return downloadBudget{commits: out.commits}
 		}
 		if u := urlForSource(sources[i]); u != "" {
 			urlList = append(urlList, u)
@@ -172,75 +225,330 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 		}
 		if sources[i].Kind == config.KindHF {
 			hfSources = append(hfSources, sources[i])
-			b, n := cachedHFSnapshot(m.hfCacheRoot(), sources[i])
-			out.bytesCached += b
-			out.filesCached += n
 		}
 	}
 
+	// A source that cannot be sized gives up the pin but not the list:
+	// the page should name every file the pass will fetch from the
+	// start, even while some of them have no size yet.
+	sized, listed := true, true
 	if len(urlList) > 0 {
 		if sum, complete := estimateHFResolveURLList(ctx, cfg, urlList); complete {
 			out.bytes += sum
 			out.files += len(urlList)
-			out.queue = append(out.queue, urlQueue...)
 		} else if sum, ok, allKnown := fetch.SumProbeContentLength(ctx, nil, urlList); ok && allKnown {
 			out.bytes += sum
 			out.files += len(urlList)
 			if len(urlQueue) == 1 {
 				urlQueue[0].BytesTotal = sum
 			}
-			out.queue = append(out.queue, urlQueue...)
 		} else {
-			return out.givenUp()
+			slog.Warn("download size unknown: a URL source could not be sized, so progress shows no total",
+				slog.Int("urls", len(urlList)))
+			sized = false
 		}
+		out.queue = append(out.queue, urlQueue...)
 	}
 
 	for i := range hfSources {
-		est, err := estimateHFSource(ctx, cfg, hfSources[i])
-		if len(est.Entries) > 0 {
-			if out.trees == nil {
-				out.trees = make(map[int][]hfwrap.TreeEntry, len(hfSources))
-			}
-			out.trees[hfSources[i].Index] = est.Entries
-		}
-		if err != nil || !est.Complete || est.Bytes <= 0 {
-			return out.givenUp()
-		}
-		out.bytes += est.Bytes
-		out.files += est.Files
-		cached := cachedHFSnapshotFiles(m.hfCacheRoot(), hfSources[i])
-		for _, e := range est.Entries {
-			fp := progress.FileProgress{Path: e.Path, BytesTotal: e.Size, Status: progress.FileWaiting}
-			if n := cached[e.Path]; n > 0 {
-				fp.Status = progress.FileDone
-				fp.BytesCompleted = n
-				if fp.BytesTotal > 0 && fp.BytesCompleted > fp.BytesTotal {
-					fp.BytesCompleted = fp.BytesTotal
-				}
-			}
-			out.queue = append(out.queue, fp)
-		}
+		s, l := m.budgetHFSource(ctx, cfg, &out, hfSources[i], targets[hfSources[i].Index], sized)
+		sized = sized && s
+		listed = listed && l
 	}
 
+	if !sized {
+		return out.givenUp(listed)
+	}
 	out.canPin = out.bytes > 0
 	return out
 }
 
+// budgetHFSource adds one hf:// source to the budget. It reports whether
+// the source was sized and whether its files were all named. Once an
+// earlier source has given up the total (sized false), a source naming
+// one file is listed by name without asking the remote again.
+func (m *Manager) budgetHFSource(ctx context.Context, cfg config.Config, out *downloadBudget, src config.ModelSource, t hfTarget, sized bool) (bool, bool) {
+	file := singleHFFile(src)
+	if !sized && t.entry == nil && file != "" {
+		out.queue = append(out.queue, m.unsizedHFRow(src, t.commit, file))
+		return false, true
+	}
+	est, err := estimateHFTarget(ctx, cfg, src, t)
+	if len(est.Entries) > 0 {
+		if out.trees == nil {
+			out.trees = make(map[int][]hfwrap.TreeEntry)
+		}
+		out.trees[src.Index] = est.Entries
+	}
+	if err != nil || !est.Complete || est.Bytes <= 0 {
+		if sized {
+			attrs := []any{slog.Int("source_index", src.Index), slog.String("repo", src.HFRepo)}
+			if err != nil {
+				attrs = append(attrs, slog.String("err", err.Error()))
+			}
+			slog.Warn("download size unknown: an hf source could not be sized, so progress shows no total", attrs...)
+		}
+		if file == "" {
+			return false, false
+		}
+		out.queue = append(out.queue, m.unsizedHFRow(src, t.commit, file))
+		return false, true
+	}
+	out.bytes += est.Bytes
+	out.files += est.Files
+	for _, e := range est.Entries {
+		fp := progress.FileProgress{Path: e.Path, BytesTotal: e.Size, Status: progress.FileWaiting}
+		if hasHFFile(m.hfCacheRoot(), src.HFRepo, est.Commit, e) {
+			fp.Status = progress.FileDone
+			fp.BytesCompleted = e.Size
+			out.bytesCached += e.Size
+			out.filesCached++
+		}
+		out.queue = append(out.queue, fp)
+	}
+	return true, true
+}
+
+// unsizedHFRow is the row for a file the budget could not size. hf links
+// snapshots/<commit>/<file> only once the file is complete, so a link at
+// the resolved commit means there is nothing left to fetch.
+func (m *Manager) unsizedHFRow(src config.ModelSource, commit, file string) progress.FileProgress {
+	fp := progress.FileProgress{Path: file, Status: progress.FileWaiting}
+	if root := m.hfCacheRoot(); root != "" && isResolvedCommit(commit) && filepath.IsLocal(filepath.FromSlash(file)) {
+		p := filepath.Join(hfwrap.SnapshotPath(root, src.HFRepo, commit), filepath.FromSlash(file))
+		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			fp.Status = progress.FileDone
+			fp.BytesTotal = info.Size()
+			fp.BytesCompleted = info.Size()
+		}
+	}
+	return fp
+}
+
 // givenUp is the budget to return when one source could not be sized:
 // no denominator to pin, but the cached counts and whatever listings
-// were fetched before giving up are still worth carrying out.
-func (b downloadBudget) givenUp() downloadBudget {
-	return downloadBudget{
+// were fetched are still worth carrying out, and so is the file list
+// when it names every file the pass fetches.
+func (b downloadBudget) givenUp(listed bool) downloadBudget {
+	out := downloadBudget{
 		bytesCached: b.bytesCached,
 		filesCached: b.filesCached,
 		trees:       b.trees,
+		commits:     b.commits,
+	}
+	if listed {
+		out.queue = b.queue
+	}
+	return out
+}
+
+// hfTarget is what the budget learned about one hf:// source before
+// sizing it: the commit its revision resolved to ("" when it did not),
+// and for a source naming one file, that file as the HEAD described it.
+type hfTarget struct {
+	commit string
+	entry  *hfwrap.TreeEntry
+}
+
+func commitsOf(targets map[int]hfTarget) map[int]string {
+	var commits map[int]string
+	for idx, t := range targets {
+		if t.commit == "" {
+			continue
+		}
+		if commits == nil {
+			commits = make(map[int]string, len(targets))
+		}
+		commits[idx] = t.commit
+	}
+	return commits
+}
+
+// resolveHFTargets resolves every hf:// source, by segment index.
+//
+// A repo and revision is resolved once per pass. A main GGUF and its
+// projector usually share one, and the second source then only needs
+// its size, asked at the commit the first resolved to so both files
+// come from one revision. A revision that could not be resolved is not
+// tried again for the next source: the remote just failed every attempt.
+func (m *Manager) resolveHFTargets(ctx context.Context, cfg config.Config, sources []config.ModelSource) map[int]hfTarget {
+	targets := make(map[int]hfTarget)
+	resolved := make(map[string]string)
+	for i := range sources {
+		src := sources[i]
+		if src.Kind != config.KindHF {
+			continue
+		}
+		key := src.HFRepo + "@" + src.HFRevision
+		commit, done := resolved[key]
+		if !done {
+			targets[src.Index] = m.resolveHFTarget(ctx, cfg, src)
+			resolved[key] = targets[src.Index].commit
+			continue
+		}
+		t := hfTarget{commit: commit}
+		if file := singleHFFile(src); file != "" && commit != "" {
+			if h, err := hfwrap.HeadFile(ctx, hfLookupConfig(cfg, src, commit, file)); err == nil && h.Commit == commit {
+				t.entry = sizedEntry(h.Entry)
+			}
+		}
+		targets[src.Index] = t
+	}
+	return targets
+}
+
+// hfResolveAttempts is how many lookups a revision gets before the
+// remote counts as unreachable for this pass.
+const hfResolveAttempts = 3
+
+// hfHeadGrace is how long an attempt that already has the commit from
+// the revision API still waits for the HEAD, whose answer also sizes
+// the file.
+const hfHeadGrace = 3 * time.Second
+
+// resolveHFTarget looks up the commit a source's revision names now.
+// A target without a commit means every attempt failed: runHF then
+// downloads at the revision as given, and hf falls back to the snapshot
+// refs/<revision> points at if it cannot reach the remote either.
+func (m *Manager) resolveHFTarget(ctx context.Context, cfg config.Config, source config.ModelSource) hfTarget {
+	file := singleHFFile(source)
+	wait := m.opts.HFResolveBackoff
+	for attempt := 1; ; attempt++ {
+		t, err := lookupHFTarget(ctx, cfg, source, file)
+		if err == nil {
+			return t
+		}
+		if attempt == hfResolveAttempts {
+			slog.Warn("remote unreachable: hf revision not resolved; a cached snapshot may be used instead",
+				slog.String("repo", source.HFRepo),
+				slog.String("revision", source.HFRevision),
+				slog.Int("attempts", attempt),
+				slog.String("err", err.Error()))
+			return hfTarget{}
+		}
+		slog.Warn("hf revision lookup failed, retrying",
+			slog.String("repo", source.HFRepo),
+			slog.String("revision", source.HFRevision),
+			slog.Int("attempt", attempt),
+			slog.Int("attempts", hfResolveAttempts),
+			slog.String("err", err.Error()))
+		select {
+		case <-ctx.Done():
+			return hfTarget{}
+		case <-time.After(wait):
+		}
+		wait *= 2
 	}
 }
 
-func estimateHFSource(ctx context.Context, cfg config.Config, source config.ModelSource) (hfwrap.RepoEstimate, error) {
+// lookupHFTarget is one attempt. It asks the revision API and, when the
+// source names one file, HEADs that file, both at once: asked one after
+// the other, an unreachable remote cost two timeouts per attempt.
+func lookupHFTarget(ctx context.Context, cfg config.Config, source config.ModelSource, file string) (hfTarget, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		target hfTarget
+		err    error
+		head   bool
+	}
+	answers := make(chan answer, 2)
+	pending := 1
+	go func() {
+		c, err := hfwrap.ResolveCommit(ctx, hfLookupConfig(cfg, source, source.HFRevision, ""))
+		answers <- answer{target: hfTarget{commit: c}, err: err}
+	}()
+	if file != "" {
+		pending++
+		go func() {
+			h, err := hfwrap.HeadFile(ctx, hfLookupConfig(cfg, source, source.HFRevision, file))
+			answers <- answer{target: hfTarget{commit: h.Commit, entry: sizedEntry(h.Entry)}, err: err, head: true}
+		}()
+	}
+
+	var fromAPI *hfTarget
+	var errs []error
+	var grace <-chan time.Time
+	for pending > 0 {
+		select {
+		case a := <-answers:
+			pending--
+			switch {
+			case a.err != nil:
+				errs = append(errs, a.err)
+			case a.head || pending == 0:
+				return a.target, nil
+			default:
+				fromAPI = &a.target
+				grace = time.After(hfHeadGrace)
+			}
+		case <-grace:
+			return *fromAPI, nil
+		}
+	}
+	if fromAPI != nil {
+		return *fromAPI, nil
+	}
+	return hfTarget{}, errors.Join(errs...)
+}
+
+// singleHFFile is the one file a source downloads by name, or "" when
+// a HEAD on it would not describe everything the source fetches: a
+// pattern, a --subdir the tree walk filters by, or an --exclude that
+// drops it.
+func singleHFFile(ms config.ModelSource) string {
+	if len(ms.HFInclude) != 1 || ms.HFSubdir != "" {
+		return ""
+	}
+	f := strings.TrimPrefix(strings.TrimSpace(ms.HFInclude[0]), "/")
+	if f == "" || strings.ContainsAny(f, "*?[") || !hfwrap.MatchPatterns(f, nil, ms.HFExclude) {
+		return ""
+	}
+	return f
+}
+
+func hfLookupConfig(cfg config.Config, src config.ModelSource, revision, file string) hfwrap.Config {
+	return hfwrap.Config{
+		Repo:     src.HFRepo,
+		Revision: revision,
+		Token:    cfg.HFToken,
+		Endpoint: cfg.HFEndpoint,
+		HFFile:   file,
+	}
+}
+
+// sizedEntry keeps a HEAD's description only when it carried a size;
+// without one the budget lists the tree instead.
+func sizedEntry(e hfwrap.TreeEntry) *hfwrap.TreeEntry {
+	if e.Size <= 0 {
+		return nil
+	}
+	return &e
+}
+
+// estimateHFTarget sizes one source from its HEAD when that answered,
+// and from the tree at the resolved commit otherwise.
+func estimateHFTarget(ctx context.Context, cfg config.Config, source config.ModelSource, t hfTarget) (hfwrap.RepoEstimate, error) {
+	if t.entry != nil {
+		return hfwrap.RepoEstimate{
+			Bytes:    t.entry.Size,
+			Files:    1,
+			Complete: true,
+			Entries:  []hfwrap.TreeEntry{*t.entry},
+			Commit:   t.commit,
+		}, nil
+	}
+	return estimateHFSource(ctx, cfg, source, t.commit)
+}
+
+func estimateHFSource(ctx context.Context, cfg config.Config, source config.ModelSource, commit string) (hfwrap.RepoEstimate, error) {
+	rev := source.HFRevision
+	if commit != "" {
+		rev = commit
+	}
 	wrap := hfwrap.Config{
 		Repo:     source.HFRepo,
-		Revision: source.HFRevision,
+		Revision: rev,
 		Token:    cfg.HFToken,
 		Endpoint: cfg.HFEndpoint,
 	}
@@ -323,53 +631,47 @@ func regularFileSize(path string) int64 {
 	return info.Size()
 }
 
-// cachedHFSnapshot sums finished snapshot files for an hf:// source
-// using the same include / exclude / subdir rules as EstimateRepo.
-// Hub `.incomplete` blobs are ignored — their names are etag+uuid and
-// are not reliably resumable across hf CLI reruns.
-func cachedHFSnapshot(cacheRoot string, ms config.ModelSource) (bytes int64, files int) {
-	sizes := cachedHFSnapshotFiles(cacheRoot, ms)
-	for _, n := range sizes {
-		bytes += n
-		files++
+// hasHFFile reports whether the content the target commit lists for one
+// file is already in the local cache.
+//
+// The local refs/<revision> is no guide here: it names the snapshot an
+// earlier pass fetched, and when the branch has moved since, that
+// snapshot holds files with the same names and different bytes. Seeding
+// those as done counted the old model toward the new one, and the
+// transfer of the new one on top of that drove bytes_completed past
+// bytes_total. Both checks below are keyed by the target, so an old
+// version never matches:
+//
+//   - snapshots/<commit>/<path> exists only once hf finished that file
+//     for that commit, however it named the blob. Mirrors that omit
+//     X-Linked-ETag (the Olares one) make hf name blobs by the mirror's
+//     ETag, which no Hub id predicts.
+//   - blobs/<id> catches content the target shares with a revision
+//     fetched earlier, which hf skips without linking it in yet.
+//
+// A `<id>.incomplete` partial is not counted: hf resumes it and the
+// first tqdm tick already carries the bytes it holds.
+func hasHFFile(cacheRoot, repo, commit string, e hfwrap.TreeEntry) bool {
+	if hasHFBlob(cacheRoot, repo, e) {
+		return true
 	}
-	return bytes, files
+	if cacheRoot == "" || repo == "" || !isResolvedCommit(commit) || !filepath.IsLocal(filepath.FromSlash(e.Path)) {
+		return false
+	}
+	p := filepath.Join(hfwrap.SnapshotPath(cacheRoot, repo, commit), filepath.FromSlash(e.Path))
+	info, err := os.Stat(p)
+	return err == nil && info.Mode().IsRegular() && info.Size() == e.Size
 }
 
-func cachedHFSnapshotFiles(cacheRoot string, ms config.ModelSource) map[string]int64 {
-	out := make(map[string]int64)
-	if ms.Kind != config.KindHF || ms.HFRepo == "" || cacheRoot == "" {
-		return out
+// hasHFBlob looks the content up under blobs/ by the id the Hub gave it.
+func hasHFBlob(cacheRoot, repo string, e hfwrap.TreeEntry) bool {
+	if cacheRoot == "" || repo == "" || !isHFBlobID(e.BlobID) {
+		return false
 	}
-	sha, err := hfwrap.ReadRefCommit(cacheRoot, ms.HFRepo, ms.HFRevision)
-	if err != nil || sha == "" {
-		return out
-	}
-	snap := hfwrap.SnapshotPath(cacheRoot, ms.HFRepo, sha)
-	_ = filepath.WalkDir(snap, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, rerr := filepath.Rel(snap, p)
-		if rerr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasSuffix(rel, ".incomplete") {
-			return nil
-		}
-		if !hfwrap.UnderSubdir(rel, ms.HFSubdir) {
-			return nil
-		}
-		if !hfwrap.MatchPatterns(rel, ms.HFInclude, ms.HFExclude) {
-			return nil
-		}
-		n := regularFileSize(p)
-		if n <= 0 {
-			return nil
-		}
-		out[rel] = n
-		return nil
-	})
-	return out
+	info, err := os.Stat(filepath.Join(hfwrap.HFRepoCacheDir(cacheRoot, repo), "blobs", e.BlobID))
+	return err == nil && info.Mode().IsRegular() && info.Size() == e.Size
 }
+
+// isHFBlobID accepts the two forms the cache names blobs by, which also
+// keeps an id from a misbehaving endpoint from naming a path elsewhere.
+func isHFBlobID(s string) bool { return isSHA256Hex(s) || isResolvedCommit(s) }

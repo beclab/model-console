@@ -1,5 +1,7 @@
 package progress
 
+import "log/slog"
+
 // Sink is the producer-facing interface used by fetch and adapter packages.
 //
 // Implementations route events into a Manager (typical) or aggregate child
@@ -85,7 +87,7 @@ func (s *managerSink) OnBytes(delta int64) {
 	pinned := s.m.filesBudgetActive
 	s.m.mu.Unlock()
 	s.m.Update(func(st *State) {
-		st.BytesCompleted += delta
+		s.m.addCompleted(st, delta)
 		if st.CurrentFile != "" {
 			addFileBytes(st, st.CurrentFile, delta, !pinned)
 		}
@@ -104,13 +106,31 @@ func (s *managerSink) OnFileBytes(path string, delta int64) {
 	s.m.mu.Unlock()
 	s.m.Update(func(st *State) {
 		if delta != 0 {
-			st.BytesCompleted += delta
+			s.m.addCompleted(st, delta)
 		}
 		if path != "" {
 			st.CurrentFile = path
 			addFileBytes(st, path, delta, !pinned)
 		}
 	})
+}
+
+// addCompleted moves BytesCompleted by delta. Once SeedDownloadBudget has
+// pinned the total it covers the whole pass, so a count past it is a
+// producer miscounting: it is capped, and logged once per pass. Must be
+// called under m.mu, which Update holds while running its callback.
+func (m *memoryManager) addCompleted(st *State, delta int64) {
+	st.BytesCompleted += delta
+	if !m.bytesBudgetActive || st.BytesTotal <= 0 || st.BytesCompleted <= st.BytesTotal {
+		return
+	}
+	if !m.overrunLogged {
+		m.overrunLogged = true
+		slog.Warn("download progress ran past the pinned total; capping it",
+			slog.Int64("bytes_completed", st.BytesCompleted),
+			slog.Int64("bytes_total", st.BytesTotal))
+	}
+	st.BytesCompleted = st.BytesTotal
 }
 
 func (s *managerSink) OnFileDone(path string) {

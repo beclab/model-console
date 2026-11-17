@@ -231,13 +231,15 @@ func baseOptions(t *testing.T, sources []config.ModelSource) Options {
 		},
 	}
 	return Options{
-		Config:                 cfg,
-		Adapter:                &fakeAdapter{kind: cfg.Engine.Kind},
-		Manager:                progress.New(time.Now()),
-		Downloader:             &fakeDownloader{},
-		MaxConcurrentDownloads: 2,
-		RetriableBackoff:       10 * time.Millisecond,
-		NowFunc:                time.Now,
+		Config:                   cfg,
+		Adapter:                  &fakeAdapter{kind: cfg.Engine.Kind},
+		Manager:                  progress.New(time.Now()),
+		Downloader:               &fakeDownloader{},
+		MaxConcurrentDownloads:   2,
+		RetriableBackoff:         10 * time.Millisecond,
+		HFResolveBackoff:         time.Millisecond,
+		ServedModelRetryInterval: time.Millisecond,
+		NowFunc:                  time.Now,
 	}
 }
 

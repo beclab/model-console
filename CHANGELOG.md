@@ -130,6 +130,90 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Fixed
 
+- An hf:// download whose branch moved since the cache was filled no longer
+  starts at 100% and climbs past it. The budget seeded `bytes_completed`
+  from the snapshot the local `refs/<revision>` still named, matching files
+  by name, so an image shipping the old model counted every old file as done
+  and the transfer of the new one stacked on top: a Qwen3.8-27B upgrade read
+  "36 GB of 18 GB" while still downloading. The tree is now listed at the
+  commit the revision resolves to, and a file counts as on disk only when
+  `snapshots/<that commit>/<path>` or `blobs/<id>` (the LFS sha256, or the
+  git blob id for small files) holds it at the listed size. The snapshot
+  check is what works behind mirrors that omit `X-Linked-ETag`, such as the
+  Olares one, where hf names blobs by the mirror's ETag. A new version
+  already in the cache is still reused, partial `.incomplete` blobs are
+  still left to tqdm, and no file is hashed. The pass then downloads at
+  that same commit and writes
+  `refs/<revision>` itself once it lands, so a push between the estimate
+  and the transfer cannot leave progress describing one revision and the
+  bytes another. `MODEL_SOURCE` is untouched; the next pass resolves the
+  branch anew, and if the revision cannot be resolved the pass downloads
+  at the revision as given, as before. With the total pinned, `bytes_completed` is also capped at
+  `bytes_total`, with one warning per pass if a producer overruns it.
+- An hf:// source that cannot reach the remote no longer runs a stale model
+  without a word. `hf download` answers from the snapshot `refs/<revision>`
+  names when its own lookup fails and exits 0, so a moved branch behind a
+  flaky mirror kept serving the old model as if the remote had confirmed
+  it. The revision is now looked up three times, two and then four seconds
+  apart, before the remote counts as unreachable, falling back to the
+  `X-Repo-Commit` of a HEAD on the requested file when the revision API
+  refuses. Once the remote is unreachable the cached snapshot is still
+  used, but the log says so twice: when the lookups give up, and when hf
+  returns the commit the cache already held.
+- An hf:// source that names one file is now sized by a HEAD on that file,
+  which also gives the commit, instead of the revision and tree APIs. The
+  Olares mirror was answering `/api/` with a 401 after fifteen seconds while
+  serving the HEAD, so a Qwen3.8-27B upgrade sat on "Estimating size" for
+  two minutes and then listed only the projector it was downloading. A
+  repo and revision is also resolved once per pass, so a main GGUF and its
+  projector come from one commit for one lookup. Pattern and `--subdir`
+  sources still list the tree.
+- A download whose size cannot be fully estimated now lists every file it
+  will fetch from the start, with the ones the remote would not size shown
+  without a size, instead of listing nothing until each file began. The
+  mirror timing out the projector's HEAD used to leave the page on
+  "Estimating size", then show the projector alone at 100% for a minute
+  before the main GGUF appeared. The total is still left unpinned, and the
+  log now says which source could not be sized.
+- An engine still serving the previous model is now restarted when a pass
+  moves `model_path` to a new one, and the model is only called ready once
+  it is back. On an upgrade the engine started on the previous sentinel
+  while the new revision downloaded, and since the wrapper reads the
+  sentinel once (and llama.cpp `-hf` picks its revision at start), it kept
+  serving the old model under a ready status. The restart goes through the
+  `engine_restart` handoff. When the request fails, or no supervise loop
+  acts on it, the model is marked failed with "the engine still serves the
+  previous model" rather than ready, and the restart stays pending: the
+  next pass (`/api/retry` or a re-registration) asks for it again even
+  though the run dir already names the new model. llama.cpp is asked
+  which file it loaded (`model_path` in `/props`) rather than trusted to
+  match the run dir, so an llm-init restart no longer forgets an engine
+  still on the previous model, an engine restarted by hand onto the new
+  one is not restarted again, and one that comes back on the previous
+  model is not called ready. Other engines, and a change to the projector
+  alone, still compare the run dir before and after the pass. llama.cpp
+  is asked again once it is alive, even when the pass restarted nothing,
+  since `/props` answers 503 while a model loads: an engine that llm-init
+  found still loading the previous model is restarted within the same
+  pass. A build without `model_path` in `/props` is called ready after
+  about 10s of unanswered queries.
+- The OpenWebUI alias `/api/chat/completions` now reaches vLLM, llama.cpp
+  and SGLang as `/v1/chat/completions`. It was forwarded as is, and none of
+  them serves that path, so llama.cpp answered 404 "File Not Found". The
+  compat suite that covers it had been skipping on main, its compose stack
+  never coming up.
+- With no pinned total, files already on disk now count toward the overall
+  progress as well as their own rows. A cached projector of 100 bytes plus
+  500 downloaded of the main file read 500 overall against rows adding up
+  to 600.
+- Looking up an hf revision before a download no longer takes up to two
+  minutes against an unreachable remote. Each attempt now asks the file
+  HEAD and the revision API at once instead of one after the other, and
+  everything asked before the download shares a 90-second budget, after
+  which the download starts without a pinned total. The warning when hf
+  returns the cached commit no longer claims the remote was unreachable:
+  the same commit comes back when nothing changed upstream.
+
 - The model card's `extensions.capacity` now follows an engine whose pod an
   upgrade replaced. The capacity reporter re-read the engine only on a
   readiness dip or a relaunch this process asked for, and a replaced pod

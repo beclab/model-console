@@ -21,6 +21,29 @@ func TestSeedDownloadBudget_OnFileStartIgnored(t *testing.T) {
 	}
 }
 
+func TestSeedDownloadBudget_CapsCompletedAtTotal(t *testing.T) {
+	t.Parallel()
+	m := New(time.Now()).(*memoryManager)
+	m.SeedDownloadBudget(1000, 900)
+	sink := m.Sink()
+	sink.OnBytes(300)
+	if got := m.Snapshot().BytesCompleted; got != 1000 {
+		t.Errorf("OnBytes: BytesCompleted = %d, want capped at 1000", got)
+	}
+	sink.(FileByteSink).OnFileBytes("a", 500)
+	if got := m.Snapshot().BytesCompleted; got != 1000 {
+		t.Errorf("OnFileBytes: BytesCompleted = %d, want capped at 1000", got)
+	}
+
+	// Without a pinned total the stream is the only measure there is.
+	m.ClearDownloadBudget()
+	m.Update(func(st *State) { st.BytesTotal, st.BytesCompleted = 100, 100 })
+	sink.OnBytes(50)
+	if got := m.Snapshot().BytesCompleted; got != 150 {
+		t.Errorf("unpinned: BytesCompleted = %d, want 150", got)
+	}
+}
+
 func TestClearDownloadBudget_RestoresOnFileStart(t *testing.T) {
 	t.Parallel()
 	m := New(time.Now()).(*memoryManager)

@@ -97,6 +97,15 @@ type Options struct {
 	// channel of one; nil leaves the loop on its own schedule.
 	RelaunchRequested <-chan struct{}
 
+	// Relauncher restarts an engine still serving the model a pass has
+	// just replaced. Nil leaves that engine running. See
+	// Manager.relaunchIfModelChanged.
+	Relauncher Relauncher
+
+	// ServedModelRetryInterval is the wait between queries asking an
+	// alive engine which model it serves. Defaults to 2s.
+	ServedModelRetryInterval time.Duration
+
 	// MaxConcurrentDownloads caps the parallel fan-out for URL fetches
 	// and the hf wrapper's --max-workers flag. 0 → 4.
 	MaxConcurrentDownloads int
@@ -115,6 +124,17 @@ type Options struct {
 	// a smaller value to keep CI fast. Permanent failures sit idle
 	// regardless of this value.
 	RetriableBackoff time.Duration
+
+	// HFResolveBackoff is the wait after the first failed lookup of an
+	// hf:// revision, doubled after the second. Defaults to 2s.
+	HFResolveBackoff time.Duration
+
+	// MetadataBudget bounds everything a pass asks the remote before it
+	// starts downloading: resolving revisions and sizing the files. When
+	// it runs out the pass downloads without a pinned total. New defaults
+	// it to 90s, which covers hfResolveAttempts lookups that each time
+	// out; zero on a Manager built without New means no budget.
+	MetadataBudget time.Duration
 
 	// NowFunc is the time source. Defaults to time.Now.
 	NowFunc func() time.Time
@@ -161,6 +181,11 @@ type Manager struct {
 	// pass is the current ensure pass, owned by the goroutine running
 	// it. See passState.
 	pass *passState
+
+	// pendingRelaunch is the model an engine was last seen serving when a
+	// restart onto a newer one did not happen, or "". Owned by the Run
+	// goroutine. See relaunchIfModelChanged.
+	pendingRelaunch string
 
 	mu          sync.Mutex
 	retry       chan struct{}
@@ -212,6 +237,15 @@ func New(opts Options) (*Manager, error) {
 	if opts.RetriableBackoff == 0 {
 		opts.RetriableBackoff = 30 * time.Second
 	}
+	if opts.HFResolveBackoff == 0 {
+		opts.HFResolveBackoff = 2 * time.Second
+	}
+	if opts.MetadataBudget == 0 {
+		opts.MetadataBudget = 90 * time.Second
+	}
+	if opts.ServedModelRetryInterval == 0 {
+		opts.ServedModelRetryInterval = 2 * time.Second
+	}
 	if opts.NowFunc == nil {
 		opts.NowFunc = time.Now
 	}
@@ -252,6 +286,22 @@ func (m *Manager) Run(ctx context.Context) error {
 		err := m.ensure(ctx)
 		if err == nil {
 			if !aliveBeforeBoot {
+				if relaunchErr := m.relaunchIfModelChanged(ctx); relaunchErr != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					// Ready would claim the new model while the old one
+					// serves. The next pass, from /api/retry or a
+					// re-registration, asks for the restart again.
+					m.opts.Manager.Update(func(s *progress.State) {
+						s.Phase = progress.PhaseFailed
+						s.LastError = relaunchErr.Error()
+					})
+					if retryErr := m.waitForRetryOrCtx(ctx, 0); retryErr != nil {
+						return retryErr
+					}
+					continue
+				}
 				if waitErr := m.opts.Adapter.WaitAlive(ctx); waitErr != nil {
 					if errors.Is(waitErr, context.Canceled) ||
 						errors.Is(waitErr, context.DeadlineExceeded) {
@@ -264,6 +314,19 @@ func (m *Manager) Run(ctx context.Context) error {
 					m.opts.Manager.Update(func(s *progress.State) {
 						s.Phase = progress.PhaseFailed
 						s.LastError = "engine never came alive: " + waitErr.Error()
+					})
+					if retryErr := m.waitForRetryOrCtx(ctx, 0); retryErr != nil {
+						return retryErr
+					}
+					continue
+				}
+				if verifyErr := m.verifyServedModel(ctx); verifyErr != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					m.opts.Manager.Update(func(s *progress.State) {
+						s.Phase = progress.PhaseFailed
+						s.LastError = verifyErr.Error()
 					})
 					if retryErr := m.waitForRetryOrCtx(ctx, 0); retryErr != nil {
 						return retryErr

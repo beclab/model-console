@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -432,6 +434,9 @@ func TestProxy_VisionBodyForwarded(t *testing.T) {
 			if len(u.gotRequests) != 1 {
 				t.Fatalf("upstream requests = %d, want 1 (body was not forwarded)", len(u.gotRequests))
 			}
+			if got := u.gotRequests[0].path; got != "/v1/chat/completions" {
+				t.Errorf("upstream path = %q, want /v1/chat/completions (no engine serves the alias)", got)
+			}
 			var obj struct {
 				Model string `json:"model"`
 			}
@@ -778,6 +783,40 @@ func TestProxy_InstallsNothing(t *testing.T) {
 	}, config.EngineVLLM)
 	if _, ok := any(a).(adapter.ModelInstaller); ok {
 		t.Error("proxy adapter implements ModelInstaller; these engines load from a path")
+	}
+}
+
+// llama.cpp reports the file it loaded in /props; the other engines are
+// not asked, and an engine still loading answers unknown.
+func TestProxy_ServedModelPath(t *testing.T) {
+	t.Parallel()
+	const path = "/cache/hf/hub/models--o--r/snapshots/c1/m.gguf"
+	var loading atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/props" {
+			http.NotFound(w, r)
+			return
+		}
+		if loading.Load() {
+			http.Error(w, `{"error":{"message":"Loading model"}}`, http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"model_path":%q,"total_slots":2}`, path)
+	}))
+	t.Cleanup(srv.Close)
+
+	a, _ := NewAdapter(config.Config{Engine: config.Engine{URL: srv.URL}, Model: config.Model{Name: "m"}}, config.EngineLlamaCpp)
+	got, err := a.ServedModelPath(context.Background())
+	if err != nil || got != path {
+		t.Errorf("ServedModelPath = %q, %v; want %q", got, err, path)
+	}
+	loading.Store(true)
+	if _, err := a.ServedModelPath(context.Background()); err == nil {
+		t.Error("an engine still loading must answer unknown")
+	}
+	v, _ := NewAdapter(config.Config{Engine: config.Engine{URL: srv.URL}, Model: config.Model{Name: "m"}}, config.EngineVLLM)
+	if _, err := v.ServedModelPath(context.Background()); err == nil {
+		t.Error("vLLM was asked for a path it does not report")
 	}
 }
 

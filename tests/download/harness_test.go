@@ -125,6 +125,9 @@ func startManager(t *testing.T, opts lifecycle.Options) *rig {
 	if opts.RetriableBackoff == 0 {
 		opts.RetriableBackoff = 30 * time.Millisecond
 	}
+	if opts.HFResolveBackoff == 0 {
+		opts.HFResolveBackoff = time.Millisecond
+	}
 	if opts.HealthInterval == 0 {
 		opts.HealthInterval = time.Hour
 	}
