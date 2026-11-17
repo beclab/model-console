@@ -770,6 +770,11 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           body_path: CHANGELOG.md
+          # A tag with a semver pre-release suffix (v1.7.27-hf-progress.1)
+          # is a stopgap cut from a hotfix branch: it must not become the
+          # Latest release ahead of the reviewed vX.Y.Z.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
             dist/llm-init-linux-amd64
             dist/llm-init-linux-arm64
