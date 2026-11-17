@@ -320,11 +320,21 @@ func (m *Manager) runHF(ctx context.Context, cfg config.Config, ms config.ModelS
 		allow = nil
 	}
 
+	// Download at the commit the budget was estimated against, so the
+	// seeded progress and the bytes hf fetches describe one revision.
+	// MODEL_SOURCE is untouched: the next pass resolves the branch anew.
+	rev := ms.HFRevision
+	commit := m.pass.hfCommit(ms)
+	if commit != "" {
+		rev = commit
+	}
+
 	slog.Info("hf download starting",
 		slog.Int("source_index", ms.Index),
 		slog.String("role", ms.Role),
 		slog.String("repo", ms.HFRepo),
 		slog.String("revision", ms.HFRevision),
+		slog.String("commit", commit),
 		slog.String("cache_dir", m.hfCacheRoot()),
 		slog.Bool("force", opts.Force),
 		slog.Any("allow_patterns", allow),
@@ -333,7 +343,7 @@ func (m *Manager) runHF(ctx context.Context, cfg config.Config, ms config.ModelS
 
 	wrapCfg := hfwrap.Config{
 		Repo:            ms.HFRepo,
-		Revision:        ms.HFRevision,
+		Revision:        rev,
 		CacheDir:        m.hfCacheRoot(),
 		HFFile:          hfFile,
 		AllowPatterns:   allow,
@@ -361,6 +371,14 @@ func (m *Manager) runHF(ctx context.Context, cfg config.Config, ms config.ModelS
 				Inc()
 		}
 		return hfwrap.Result{}, m.fail(hfUserMessage(err), retriable)
+	}
+	if rev != ms.HFRevision {
+		// hf only writes refs/<branch> when it resolves the branch
+		// itself, and reuseHFDownload finds the snapshot through it.
+		if err := hfwrap.WriteRefCommit(m.hfCacheRoot(), ms.HFRepo, ms.HFRevision, rev); err != nil {
+			slog.Warn("could not record the downloaded commit under its revision; the next boot downloads again",
+				slog.String("repo", ms.HFRepo), slog.String("revision", ms.HFRevision), slog.String("err", err.Error()))
+		}
 	}
 	m.writeHFSidecar(cfg, ms, res)
 	return res, nil

@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -131,16 +134,44 @@ func TestEstimateRepo_WholeRepoAndFilters(t *testing.T) {
 	}
 }
 
-func TestEstimateRepo_ListsAtResolvedCommit(t *testing.T) {
+func TestResolveCommit(t *testing.T) {
 	t.Parallel()
 	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
-	var revisionCalls int
+	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		switch r.URL.Path {
 		case "/api/models/o/r/revision/main":
-			revisionCalls++
 			_, _ = w.Write([]byte(`{"id":"o/r","sha":"` + commit + `"}`))
-		case "/api/models/o/r/tree/" + commit:
+		case "/api/models/o/r/revision/bad":
+			_, _ = w.Write([]byte(`{"sha":"../../x"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+
+	if got, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL}); err != nil || got != commit {
+		t.Fatalf("branch: %q %v, want %s", got, err, commit)
+	}
+	if got, err := ResolveCommit(ctx, Config{Repo: "o/r", Revision: commit, Endpoint: srv.URL}); err != nil || got != commit || calls != 1 {
+		t.Fatalf("pinned: %q %v calls=%d, want %s and no request", got, err, calls, commit)
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Revision: "bad", Endpoint: srv.URL}); err == nil {
+		t.Error("a non-commit sha must be an error")
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Revision: "gone", Endpoint: srv.URL}); err == nil {
+		t.Error("a missing revision API must be an error")
+	}
+}
+
+func TestEstimateRepo_CommitOnlyWhenListedAtOne(t *testing.T) {
+	t.Parallel()
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/o/r/tree/main", "/api/models/o/r/tree/" + commit:
 			_, _ = w.Write([]byte(`[{"type":"file","path":"m.gguf","size":9}]`))
 		default:
 			http.NotFound(w, r)
@@ -148,40 +179,67 @@ func TestEstimateRepo_ListsAtResolvedCommit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	est, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL}, nil, nil, "")
-	if err != nil {
-		t.Fatal(err)
+	at, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Revision: commit, Endpoint: srv.URL}, nil, nil, "")
+	if err != nil || at.Commit != commit || at.Bytes != 9 {
+		t.Fatalf("at commit: %+v %v", at, err)
 	}
-	if est.Commit != commit || est.Bytes != 9 {
-		t.Fatalf("branch: %+v, want commit %s and 9 bytes", est, commit)
-	}
-
-	pinned, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Revision: commit, Endpoint: srv.URL}, nil, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pinned.Commit != commit || revisionCalls != 1 {
-		t.Fatalf("pinned: commit=%q revision calls=%d, want %s and no extra call", pinned.Commit, revisionCalls, commit)
+	branch, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL}, nil, nil, "")
+	if err != nil || branch.Commit != "" || branch.Bytes != 9 {
+		t.Fatalf("branch: %+v %v, want no commit", branch, err)
 	}
 }
 
-func TestEstimateRepo_UnresolvedRevisionFallsBack(t *testing.T) {
+func TestWriteRefCommit(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/models/o/r/tree/main" {
-			http.NotFound(w, r)
-			return
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	cache := t.TempDir()
+	for _, ref := range []string{"", "v1.0", "refs/pr/1"} {
+		if err := WriteRefCommit(cache, "o/r", ref, commit); err != nil {
+			t.Fatalf("ref %q: %v", ref, err)
 		}
-		_, _ = w.Write([]byte(`[{"type":"file","path":"m.gguf","size":9}]`))
-	}))
-	t.Cleanup(srv.Close)
+		if got, err := ReadRefCommit(cache, "o/r", ref); err != nil || got != commit {
+			t.Errorf("ref %q read back %q %v", ref, got, err)
+		}
+	}
+	if err := WriteRefCommit(cache, "o/r", "../../escape", commit); err == nil {
+		t.Error("a ref leaving refs/ must be refused")
+	}
+	if err := WriteRefCommit(cache, "o/r", "main", "not-a-commit"); err == nil {
+		t.Error("a non-commit must be refused")
+	}
+	if err := WriteRefCommit(cache, "o/r", commit, commit); err != nil {
+		t.Errorf("a commit revision needs no ref: %v", err)
+	}
+}
 
-	est, err := EstimateRepo(context.Background(), Config{Repo: "o/r", Endpoint: srv.URL}, nil, nil, "")
-	if err != nil {
+func TestWriteRefCommit_ReadableByOtherUsers(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+	cache := t.TempDir()
+	refs := filepath.Join(HFRepoCacheDir(cache, "o/r"), "refs")
+
+	if err := WriteRefCommit(cache, "o/r", "main", commit); err != nil {
 		t.Fatal(err)
 	}
-	if est.Commit != "" || est.Bytes != 9 || !est.Complete {
-		t.Fatalf("fallback: %+v, want the branch tree and no commit", est)
+	if info, err := os.Stat(filepath.Join(refs, "main")); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("new ref mode = %v (%v), want 0644", info.Mode().Perm(), err)
+	}
+
+	existing := filepath.Join(refs, "v1")
+	if err := os.WriteFile(existing, []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(existing, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRefCommit(cache, "o/r", "v1", commit); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(existing); err != nil || info.Mode().Perm() != 0o664 {
+		t.Fatalf("overwritten ref mode = %v (%v), want the existing 0664", info.Mode().Perm(), err)
 	}
 }
 

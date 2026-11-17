@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -312,6 +313,65 @@ func TestEnterDownloadPhase_SeedsTargetSnapshotWithMirrorBlobNames(t *testing.T)
 		if f.Status != want[f.Path] {
 			t.Errorf("%s status=%q, want %q", f.Path, f.Status, want[f.Path])
 		}
+	}
+}
+
+// main moves between the estimate and the download. hf must fetch the
+// commit the progress was seeded from, and refs/main must name it once
+// it lands so the next boot finds the download record through it.
+func TestEnsure_DownloadsAtTheEstimatedCommit(t *testing.T) {
+	t.Parallel()
+	const (
+		estimated = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"
+		movedTo   = "1111111111111111111111111111111111111111"
+		repo      = "owner/moving"
+	)
+	var resolves atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/models/" + repo + "/revision/main":
+			sha := estimated
+			if resolves.Add(1) > 1 {
+				sha = movedTo
+			}
+			fmt.Fprintf(w, `{"sha":%q}`, sha)
+		case "/api/models/" + repo + "/tree/" + estimated:
+			fmt.Fprintf(w, `[{"path":"model.gguf","size":4,"type":"file","oid":"%s","lfs":{"oid":"%s"}}]`, gitOID1, blobA)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cache := t.TempDir()
+	o := baseOptions(t, []config.ModelSource{hfSource(repo, "", "model.gguf")})
+	o.HFCacheRoot = cache
+	o.Config.HFEndpoint = server.URL
+	var got hfwrap.Config
+	o.HFRun = func(_ context.Context, c hfwrap.Config, _ progress.Sink) (hfwrap.Result, error) {
+		got = c
+		writeSnapshotAt(t, cache, repo, c.Revision, map[string]int{"model.gguf": 4})
+		return hfwrap.Result{Status: "ok", Commit: c.Revision,
+			Path: filepath.Join(hfwrap.SnapshotPath(cache, repo, c.Revision), "model.gguf")}, nil
+	}
+	mgr, err := New(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ensure(context.Background()); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if got.Revision != estimated {
+		t.Errorf("hf ran at %q, want the estimated commit %s", got.Revision, estimated)
+	}
+	if n := resolves.Load(); n != 1 {
+		t.Errorf("revision resolved %d times, want once", n)
+	}
+	if sha, _ := hfwrap.ReadRefCommit(cache, repo, ""); sha != estimated {
+		t.Errorf("refs/main = %q, want %s", sha, estimated)
+	}
+	if _, ok := mgr.reuseHFDownload(context.Background(), o.Config, o.Config.Sources[0], "size"); !ok {
+		t.Error("the next pass must reuse the record through refs/main")
 	}
 }
 

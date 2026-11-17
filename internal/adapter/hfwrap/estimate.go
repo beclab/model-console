@@ -24,8 +24,10 @@ type RepoEstimate struct {
 	// Entries is each matched file, in tree order. Used to seed the
 	// dashboard file list before the first transfer starts.
 	Entries []TreeEntry
-	// Commit is the commit Entries were listed at, or "" when the
-	// endpoint would not resolve the revision.
+	// Commit is the commit Entries were listed at: cfg.Revision when it
+	// is one, "" for a branch or tag. Neither the Hub nor the Olares
+	// mirror puts X-Repo-Commit on tree responses, so a caller that needs
+	// it resolves the revision first (ResolveCommit) and lists at that.
 	Commit string
 }
 
@@ -37,13 +39,6 @@ func EstimateRepo(ctx context.Context, cfg Config, include, exclude []string, su
 	var zero RepoEstimate
 	if cfg.Repo == "" {
 		return zero, nil
-	}
-	// Listing at the resolved commit rather than the branch keeps
-	// Entries and Commit describing the same revision. Neither the Hub
-	// nor the Olares mirror puts X-Repo-Commit on tree responses.
-	commit, rerr := ResolveCommit(ctx, cfg)
-	if rerr == nil {
-		cfg.Revision = commit
 	}
 	entries, _, err := fetchTree(ctx, cfg, true)
 	if err != nil {
@@ -67,6 +62,10 @@ func EstimateRepo(ctx context.Context, cfg Config, include, exclude []string, su
 	var bytes int64
 	for _, e := range matched {
 		bytes += e.Size
+	}
+	var commit string
+	if isHexSHA(cfg.Revision) {
+		commit = cfg.Revision
 	}
 	return RepoEstimate{
 		Bytes:    bytes,

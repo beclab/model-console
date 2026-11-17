@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,11 @@ type passState struct {
 	// repository file rather than after the file name it shares with
 	// its namesakes in other directories.
 	hfTrees map[int][]hfwrap.TreeEntry
+	// hfCommits is the commit each hf:// source's revision resolved to
+	// while the budget was estimated, by segment index. runHF downloads
+	// at it, so the progress seeded from that commit's listing describes
+	// the bytes hf fetches even if the branch moves in between.
+	hfCommits map[int]string
 	// driftNotes is one remote verdict per source, and driftNote is
 	// what they last rendered to. See Manager.setDriftNote.
 	driftNotes map[string]string
@@ -50,6 +56,15 @@ func (p *passState) hfTree(ms config.ModelSource) []hfwrap.TreeEntry {
 		return nil
 	}
 	return p.hfTrees[ms.Index]
+}
+
+// hfCommit returns the commit recorded for one source, or "" when its
+// revision was not resolved.
+func (p *passState) hfCommit(ms config.ModelSource) string {
+	if p == nil {
+		return ""
+	}
+	return p.hfCommits[ms.Index]
 }
 
 // enterDownloadPhase moves the pass into phase=download and pins the
@@ -81,6 +96,7 @@ func (m *Manager) enterDownloadPhase(ctx context.Context) {
 	m.setPhase(progress.PhaseDownload)
 	b := m.estimateDownloadBudget(ctx, p.cfg, p.main, p.mmproj, p.extras)
 	p.hfTrees = b.trees
+	p.hfCommits = b.commits
 	if b.canPin && b.bytes > 0 {
 		m.opts.Manager.SeedDownloadBudget(b.bytes, seedCompletedForPass(p.force, b.bytesCached))
 		if queue := fileListForPass(p.force, b.queue); len(queue) > 0 {
@@ -133,6 +149,8 @@ type downloadBudget struct {
 	// survives the early returns that give up on pinning a denominator:
 	// naming a tqdm bar needs the listing, not a complete estimate.
 	trees map[int][]hfwrap.TreeEntry
+	// commits is the resolved commit per hf:// source, by segment index.
+	commits map[int]string
 }
 
 // estimateDownloadBudget sums what this pass will fetch across every
@@ -193,7 +211,14 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 	}
 
 	for i := range hfSources {
-		est, err := estimateHFSource(ctx, cfg, hfSources[i])
+		commit := resolveHFCommit(ctx, cfg, hfSources[i])
+		if commit != "" {
+			if out.commits == nil {
+				out.commits = make(map[int]string, len(hfSources))
+			}
+			out.commits[hfSources[i].Index] = commit
+		}
+		est, err := estimateHFSource(ctx, cfg, hfSources[i], commit)
 		if len(est.Entries) > 0 {
 			if out.trees == nil {
 				out.trees = make(map[int][]hfwrap.TreeEntry, len(hfSources))
@@ -229,13 +254,35 @@ func (b downloadBudget) givenUp() downloadBudget {
 		bytesCached: b.bytesCached,
 		filesCached: b.filesCached,
 		trees:       b.trees,
+		commits:     b.commits,
 	}
 }
 
-func estimateHFSource(ctx context.Context, cfg config.Config, source config.ModelSource) (hfwrap.RepoEstimate, error) {
-	wrap := hfwrap.Config{
+// resolveHFCommit returns the commit a source's revision names now, or
+// "" when it could not be resolved.
+func resolveHFCommit(ctx context.Context, cfg config.Config, source config.ModelSource) string {
+	c, err := hfwrap.ResolveCommit(ctx, hfwrap.Config{
 		Repo:     source.HFRepo,
 		Revision: source.HFRevision,
+		Token:    cfg.HFToken,
+		Endpoint: cfg.HFEndpoint,
+	})
+	if err != nil {
+		slog.Debug("hf revision not resolved; downloading at the revision as given",
+			slog.String("repo", source.HFRepo), slog.String("revision", source.HFRevision), slog.String("err", err.Error()))
+		return ""
+	}
+	return c
+}
+
+func estimateHFSource(ctx context.Context, cfg config.Config, source config.ModelSource, commit string) (hfwrap.RepoEstimate, error) {
+	rev := source.HFRevision
+	if commit != "" {
+		rev = commit
+	}
+	wrap := hfwrap.Config{
+		Repo:     source.HFRepo,
+		Revision: rev,
 		Token:    cfg.HFToken,
 		Endpoint: cfg.HFEndpoint,
 	}

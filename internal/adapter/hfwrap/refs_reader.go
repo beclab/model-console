@@ -2,6 +2,7 @@ package hfwrap
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,59 @@ func ReadRefCommit(cacheRoot, repo, ref string) (string, error) {
 		return "", nil
 	}
 	return sha, nil
+}
+
+// WriteRefCommit records sha under refs/<ref>, the file `hf download`
+// writes when it resolves a branch or tag itself. A download run at a
+// commit resolved beforehand leaves that write to the caller, and
+// without it the next boot cannot find the snapshot by its branch.
+func WriteRefCommit(cacheRoot, repo, ref, sha string) error {
+	if isHexSHA(ref) {
+		return nil
+	}
+	if ref == "" {
+		ref = defaultHFRef
+	}
+	if !isHexSHA(sha) {
+		return fmt.Errorf("hfwrap refs: %q is not a commit", sha)
+	}
+	rel := filepath.FromSlash(ref)
+	if !filepath.IsLocal(rel) {
+		return fmt.Errorf("hfwrap refs: unsafe ref %q", ref)
+	}
+	path := filepath.Join(HFRepoCacheDir(cacheRoot, repo), "refs", rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	// CreateTemp makes the file 0600; an engine or app reading a shared
+	// cache under another uid needs the ref readable, as hf leaves it.
+	perm := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".ref-*")
+	if err != nil {
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if _, err := tmp.WriteString(sha); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+		return err
+	}
+	return nil
 }
 
 // isHexSHA reports whether s is a 40-char lowercase hex string.

@@ -142,7 +142,13 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   check is what works behind mirrors that omit `X-Linked-ETag`, such as the
   Olares one, where hf names blobs by the mirror's ETag. A new version
   already in the cache is still reused, partial `.incomplete` blobs are
-  still left to tqdm, and no file is hashed. With the total pinned, `bytes_completed` is also capped at
+  still left to tqdm, and no file is hashed. The pass then downloads at
+  that same commit and writes
+  `refs/<revision>` itself once it lands, so a push between the estimate
+  and the transfer cannot leave progress describing one revision and the
+  bytes another. `MODEL_SOURCE` is untouched; the next pass resolves the
+  branch anew, and if the revision cannot be resolved the pass downloads
+  at the revision as given, as before. With the total pinned, `bytes_completed` is also capped at
   `bytes_total`, with one warning per pass if a producer overruns it.
 
 - The model card's `extensions.capacity` now follows an engine whose pod an
