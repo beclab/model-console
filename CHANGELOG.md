@@ -168,6 +168,13 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   repo and revision is also resolved once per pass, so a main GGUF and its
   projector come from one commit for one lookup. Pattern and `--subdir`
   sources still list the tree.
+- A download whose size cannot be fully estimated now lists every file it
+  will fetch from the start, with the ones the remote would not size shown
+  without a size, instead of listing nothing until each file began. The
+  mirror timing out the projector's HEAD used to leave the page on
+  "Estimating size", then show the projector alone at 100% for a minute
+  before the main GGUF appeared. The total is still left unpinned, and the
+  log now says which source could not be sized.
 - Looking up an hf revision before a download no longer takes up to two
   minutes against an unreachable remote. Each attempt now asks the file
   HEAD and the revision API at once instead of one after the other, and

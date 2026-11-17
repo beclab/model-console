@@ -115,7 +115,21 @@ func (m *Manager) enterDownloadPhase(ctx context.Context) {
 		} else if b.files > 0 {
 			m.opts.Manager.SeedDownloadFiles(b.files, seedCompletedFiles(p.force, b.filesCached))
 		}
+	} else if queue := fileListForPass(p.force, b.queue); len(queue) > 0 {
+		m.opts.Manager.SeedCachedBytes(cachedRowBytes(queue))
+		m.opts.Manager.SeedDownloadFileList(queue)
 	}
+}
+
+// cachedRowBytes is what the rows already on disk hold.
+func cachedRowBytes(queue []progress.FileProgress) int64 {
+	var n int64
+	for _, f := range queue {
+		if f.Status == progress.FileDone {
+			n += f.BytesCompleted
+		}
+	}
+	return n
 }
 
 func fileListForPass(force bool, queue []progress.FileProgress) []progress.FileProgress {
@@ -208,62 +222,118 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 		}
 	}
 
+	// A source that cannot be sized gives up the pin but not the list:
+	// the page should name every file the pass will fetch from the
+	// start, even while some of them have no size yet.
+	sized, listed := true, true
 	if len(urlList) > 0 {
 		if sum, complete := estimateHFResolveURLList(ctx, cfg, urlList); complete {
 			out.bytes += sum
 			out.files += len(urlList)
-			out.queue = append(out.queue, urlQueue...)
 		} else if sum, ok, allKnown := fetch.SumProbeContentLength(ctx, nil, urlList); ok && allKnown {
 			out.bytes += sum
 			out.files += len(urlList)
 			if len(urlQueue) == 1 {
 				urlQueue[0].BytesTotal = sum
 			}
-			out.queue = append(out.queue, urlQueue...)
 		} else {
-			return out.givenUp()
+			slog.Warn("download size unknown: a URL source could not be sized, so progress shows no total",
+				slog.Int("urls", len(urlList)))
+			sized = false
 		}
+		out.queue = append(out.queue, urlQueue...)
 	}
 
 	for i := range hfSources {
-		est, err := estimateHFTarget(ctx, cfg, hfSources[i], targets[hfSources[i].Index])
-		if len(est.Entries) > 0 {
-			if out.trees == nil {
-				out.trees = make(map[int][]hfwrap.TreeEntry, len(hfSources))
-			}
-			out.trees[hfSources[i].Index] = est.Entries
-		}
-		if err != nil || !est.Complete || est.Bytes <= 0 {
-			return out.givenUp()
-		}
-		out.bytes += est.Bytes
-		out.files += est.Files
-		for _, e := range est.Entries {
-			fp := progress.FileProgress{Path: e.Path, BytesTotal: e.Size, Status: progress.FileWaiting}
-			if hasHFFile(m.hfCacheRoot(), hfSources[i].HFRepo, est.Commit, e) {
-				fp.Status = progress.FileDone
-				fp.BytesCompleted = e.Size
-				out.bytesCached += e.Size
-				out.filesCached++
-			}
-			out.queue = append(out.queue, fp)
-		}
+		s, l := m.budgetHFSource(ctx, cfg, &out, hfSources[i], targets[hfSources[i].Index], sized)
+		sized = sized && s
+		listed = listed && l
 	}
 
+	if !sized {
+		return out.givenUp(listed)
+	}
 	out.canPin = out.bytes > 0
 	return out
 }
 
+// budgetHFSource adds one hf:// source to the budget. It reports whether
+// the source was sized and whether its files were all named. Once an
+// earlier source has given up the total (sized false), a source naming
+// one file is listed by name without asking the remote again.
+func (m *Manager) budgetHFSource(ctx context.Context, cfg config.Config, out *downloadBudget, src config.ModelSource, t hfTarget, sized bool) (bool, bool) {
+	file := singleHFFile(src)
+	if !sized && t.entry == nil && file != "" {
+		out.queue = append(out.queue, m.unsizedHFRow(src, t.commit, file))
+		return false, true
+	}
+	est, err := estimateHFTarget(ctx, cfg, src, t)
+	if len(est.Entries) > 0 {
+		if out.trees == nil {
+			out.trees = make(map[int][]hfwrap.TreeEntry)
+		}
+		out.trees[src.Index] = est.Entries
+	}
+	if err != nil || !est.Complete || est.Bytes <= 0 {
+		if sized {
+			attrs := []any{slog.Int("source_index", src.Index), slog.String("repo", src.HFRepo)}
+			if err != nil {
+				attrs = append(attrs, slog.String("err", err.Error()))
+			}
+			slog.Warn("download size unknown: an hf source could not be sized, so progress shows no total", attrs...)
+		}
+		if file == "" {
+			return false, false
+		}
+		out.queue = append(out.queue, m.unsizedHFRow(src, t.commit, file))
+		return false, true
+	}
+	out.bytes += est.Bytes
+	out.files += est.Files
+	for _, e := range est.Entries {
+		fp := progress.FileProgress{Path: e.Path, BytesTotal: e.Size, Status: progress.FileWaiting}
+		if hasHFFile(m.hfCacheRoot(), src.HFRepo, est.Commit, e) {
+			fp.Status = progress.FileDone
+			fp.BytesCompleted = e.Size
+			out.bytesCached += e.Size
+			out.filesCached++
+		}
+		out.queue = append(out.queue, fp)
+	}
+	return true, true
+}
+
+// unsizedHFRow is the row for a file the budget could not size. hf links
+// snapshots/<commit>/<file> only once the file is complete, so a link at
+// the resolved commit means there is nothing left to fetch.
+func (m *Manager) unsizedHFRow(src config.ModelSource, commit, file string) progress.FileProgress {
+	fp := progress.FileProgress{Path: file, Status: progress.FileWaiting}
+	if root := m.hfCacheRoot(); root != "" && isResolvedCommit(commit) && filepath.IsLocal(filepath.FromSlash(file)) {
+		p := filepath.Join(hfwrap.SnapshotPath(root, src.HFRepo, commit), filepath.FromSlash(file))
+		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			fp.Status = progress.FileDone
+			fp.BytesTotal = info.Size()
+			fp.BytesCompleted = info.Size()
+		}
+	}
+	return fp
+}
+
 // givenUp is the budget to return when one source could not be sized:
 // no denominator to pin, but the cached counts and whatever listings
-// were fetched before giving up are still worth carrying out.
-func (b downloadBudget) givenUp() downloadBudget {
-	return downloadBudget{
+// were fetched are still worth carrying out, and so is the file list
+// when it names every file the pass fetches.
+func (b downloadBudget) givenUp(listed bool) downloadBudget {
+	out := downloadBudget{
 		bytesCached: b.bytesCached,
 		filesCached: b.filesCached,
 		trees:       b.trees,
 		commits:     b.commits,
 	}
+	if listed {
+		out.queue = b.queue
+	}
+	return out
 }
 
 // hfTarget is what the budget learned about one hf:// source before

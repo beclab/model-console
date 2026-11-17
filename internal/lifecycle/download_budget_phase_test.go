@@ -463,8 +463,8 @@ func TestEnterDownloadPhase_StopsAtTheMetadataBudget(t *testing.T) {
 		t.Errorf("estimate took %s, want it bounded by the 300ms budget", took)
 	}
 	st := pm.Snapshot()
-	if st.BytesTotal != 0 {
-		t.Errorf("bytes_total=%d, want no pinned total", st.BytesTotal)
+	if st.BytesTotal != 0 || len(st.Files) != 2 {
+		t.Errorf("bytes_total=%d files=%+v, want no total and both files listed", st.BytesTotal, st.Files)
 	}
 }
 
@@ -535,6 +535,90 @@ func TestEnterDownloadPhase_SizesSingleFileSourcesByHead(t *testing.T) {
 	}
 	if n := heads.Load(); n != 2 {
 		t.Errorf("%d HEADs, want one per file", n)
+	}
+}
+
+// The mirror times out the projector's HEAD and its tree listing, so the
+// pass has no total. The page still lists both files from the start;
+// the one without a size reads done when its snapshot link is there.
+func TestEnterDownloadPhase_ListsEveryFileWhenOneCannotBeSized(t *testing.T) {
+	t.Parallel()
+	const (
+		commit = "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+		repo   = "unsloth/vlm"
+	)
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("projector_cached=%v", cached), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/models/"+repo+"/revision/main":
+					fmt.Fprintf(w, `{"sha":%q}`, commit)
+				case r.URL.Path == "/"+repo+"/resolve/"+commit+"/model.gguf" && r.Method == http.MethodHead:
+					w.Header().Set("X-Repo-Commit", commit)
+					w.Header().Set("Content-Length", "1000")
+				case strings.HasPrefix(r.URL.Path, "/api/"):
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+				default:
+					http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			cache := t.TempDir()
+			if cached {
+				writeSnapshotAt(t, cache, repo, commit, map[string]int{"mmproj.gguf": 100})
+			}
+			pm := progress.New(time.Now())
+			m := newBudgetManager(t, pm, server.URL, cache)
+			main := config.ModelSource{Index: 1, Kind: config.KindHF, HFRepo: repo, HFInclude: []string{"model.gguf"}}
+			extra := config.ModelSource{Index: 2, Kind: config.KindHF, Role: config.RoleExtra, HFRepo: repo, HFInclude: []string{"mmproj.gguf"}}
+			m.pass = &passState{cfg: config.Config{HFEndpoint: server.URL}, main: &main, extras: []config.ModelSource{extra}}
+			m.enterDownloadPhase(context.Background())
+
+			st := pm.Snapshot()
+			var onDisk int64
+			if cached {
+				onDisk = 100
+			}
+			if st.BytesTotal != onDisk || st.BytesCompleted != onDisk {
+				t.Errorf("bytes %d/%d, want %d/%d: only what is on disk, no pinned total",
+					st.BytesCompleted, st.BytesTotal, onDisk, onDisk)
+			}
+			want := map[string]progress.FileProgress{
+				"mmproj.gguf": {Path: "mmproj.gguf", Status: progress.FileWaiting},
+				"model.gguf":  {Path: "model.gguf", BytesTotal: 1000, Status: progress.FileWaiting},
+			}
+			if cached {
+				want["mmproj.gguf"] = progress.FileProgress{Path: "mmproj.gguf", BytesTotal: 100, BytesCompleted: 100, Status: progress.FileDone}
+			}
+			if len(st.Files) != len(want) || st.FilesTotal != len(want) {
+				t.Fatalf("files_total=%d files=%+v, want both listed", st.FilesTotal, st.Files)
+			}
+			for _, f := range st.Files {
+				if f != want[f.Path] {
+					t.Errorf("row %+v, want %+v", f, want[f.Path])
+				}
+			}
+			if c := m.pass.hfCommit(extra); c != commit {
+				t.Errorf("extra commit %q, want %s", c, commit)
+			}
+
+			sink := pm.Sink()
+			sink.OnFileStart("model.gguf", 1000)
+			sink.OnBytes(500)
+			st = pm.Snapshot()
+			if st.BytesCompleted != onDisk+500 || st.BytesTotal != onDisk+1000 {
+				t.Errorf("mid-download bytes %d/%d, want %d/%d", st.BytesCompleted, st.BytesTotal, onDisk+500, onDisk+1000)
+			}
+			var rows int64
+			for _, f := range st.Files {
+				rows += f.BytesCompleted
+			}
+			if rows != st.BytesCompleted {
+				t.Errorf("rows add up to %d, the total reads %d", rows, st.BytesCompleted)
+			}
+		})
 	}
 }
 
