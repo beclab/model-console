@@ -175,6 +175,32 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   "Estimating size", then show the projector alone at 100% for a minute
   before the main GGUF appeared. The total is still left unpinned, and the
   log now says which source could not be sized.
+- An engine still serving the previous model is now restarted when a pass
+  moves `model_path` to a new one, and the model is only called ready once
+  it is back. On an upgrade the engine started on the previous sentinel
+  while the new revision downloaded, and since the wrapper reads the
+  sentinel once (and llama.cpp `-hf` picks its revision at start), it kept
+  serving the old model under a ready status. The restart goes through the
+  `engine_restart` handoff. When the request fails, or no supervise loop
+  acts on it, the model is marked failed with "the engine still serves the
+  previous model" rather than ready, and the restart stays pending: the
+  next pass (`/api/retry` or a re-registration) asks for it again even
+  though the run dir already names the new model. llama.cpp is asked
+  which file it loaded (`model_path` in `/props`) rather than trusted to
+  match the run dir, so an llm-init restart no longer forgets an engine
+  still on the previous model, an engine restarted by hand onto the new
+  one is not restarted again, and one that comes back on the previous
+  model is not called ready. Other engines, and a change to the projector
+  alone, still compare the run dir before and after the pass. llama.cpp
+  is asked again once it is alive, even when the pass restarted nothing,
+  since `/props` answers 503 while a model loads: an engine that llm-init
+  found still loading the previous model is restarted within the same
+  pass. A build without `model_path` in `/props` is called ready after
+  about 10s of unanswered queries.
+- With no pinned total, files already on disk now count toward the overall
+  progress as well as their own rows. A cached projector of 100 bytes plus
+  500 downloaded of the main file read 500 overall against rows adding up
+  to 600.
 - Looking up an hf revision before a download no longer takes up to two
   minutes against an unreachable remote. Each attempt now asks the file
   HEAD and the revision API at once instead of one after the other, and

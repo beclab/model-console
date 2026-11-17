@@ -41,7 +41,12 @@ func (m *Manager) ensure(ctx context.Context) error {
 		return m.fail("no main MODEL_SOURCE configured", false)
 	}
 
-	m.pass = &passState{cfg: cfg, main: main, mmproj: mmproj, extras: extras, force: opts.Force}
+	prevModel := loadedModel(cfg.Runtime.RunDir)
+	if m.pendingRelaunch != "" {
+		prevModel = m.pendingRelaunch
+	}
+	m.pass = &passState{cfg: cfg, main: main, mmproj: mmproj, extras: extras, force: opts.Force,
+		prevModel: prevModel}
 
 	extraPaths := make([]string, 0, len(extras))
 	for i := range extras {

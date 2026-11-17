@@ -225,6 +225,38 @@ func (a *Adapter) Ready(ctx context.Context) (adapter.ReadyState, error) {
 	return adapter.ReadyState{Alive: true, ModelExists: exists}, nil
 }
 
+// ServedModelPath reads model_path from llama.cpp's /props. Engines
+// that do not report it return an error, which callers read as unknown.
+func (a *Adapter) ServedModelPath(ctx context.Context) (string, error) {
+	if a.kind != config.EngineLlamaCpp {
+		return "", fmt.Errorf("proxy: %s does not report its model path", a.kind)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, joinPath(a.cfg.Engine.URL, "/props"), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("proxy: GET /props status %d", resp.StatusCode)
+	}
+	var body struct {
+		ModelPath string `json:"model_path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("proxy: decode /props: %w", err)
+	}
+	if body.ModelPath == "" {
+		return "", errors.New("proxy: /props has no model_path")
+	}
+	return body.ModelPath, nil
+}
+
 // These adapters install nothing, so they do not implement
 // adapter.ModelInstaller. vLLM, llama.cpp and SGLang are launched with a
 // path and read it: llm-init puts the files there and the engine's own

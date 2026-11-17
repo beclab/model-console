@@ -285,6 +285,7 @@ func run(args []string, stdout, stderr *os.File, getenv config.Getenv) int {
 		MaxDownloadBytes:       cfg.Runtime.MaxDownloadBytes,
 		RelaunchInFlight:       tracker.Relaunching,
 		RelaunchRequested:      relaunchWake,
+		Relauncher:             tracker,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "lifecycle init: %v\n", err)

@@ -49,6 +49,12 @@ type passState struct {
 	// what they last rendered to. See Manager.setDriftNote.
 	driftNotes map[string]string
 	driftNote  string
+	// prevModel is what the run dir told the engine to load when the
+	// pass began. See Manager.relaunchIfModelChanged.
+	prevModel string
+	// relaunched is set once this pass restarted the engine, so it is
+	// not restarted again when it comes back on another model.
+	relaunched bool
 }
 
 // hfTree returns the listing recorded for one source, or nil when the
