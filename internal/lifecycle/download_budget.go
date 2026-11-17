@@ -2,10 +2,12 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/llm-init/llm-init/internal/adapter/hfwrap"
 	"github.com/llm-init/llm-init/internal/config"
@@ -94,7 +96,16 @@ func (m *Manager) enterDownloadPhase(ctx context.Context) {
 	}
 	p.entered = true
 	m.setPhase(progress.PhaseDownload)
-	b := m.estimateDownloadBudget(ctx, p.cfg, p.main, p.mmproj, p.extras)
+	budgetCtx, cancel := ctx, context.CancelFunc(func() {})
+	if m.opts.MetadataBudget > 0 {
+		budgetCtx, cancel = context.WithTimeout(ctx, m.opts.MetadataBudget)
+	}
+	b := m.estimateDownloadBudget(budgetCtx, p.cfg, p.main, p.mmproj, p.extras)
+	if errors.Is(budgetCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		slog.Warn("download metadata lookups ran past their budget; downloading with what they found",
+			slog.Duration("budget", m.opts.MetadataBudget))
+	}
+	cancel()
 	p.hfTrees = b.trees
 	p.hfCommits = b.commits
 	if b.canPin && b.bytes > 0 {
@@ -170,9 +181,13 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 	if main != nil {
 		sources = append(sources, *main)
 	}
+	// Resolved ahead of everything that can give up on the estimate:
+	// runHF needs the commit whether or not a denominator gets pinned.
+	targets := m.resolveHFTargets(ctx, cfg, sources)
+	out.commits = commitsOf(targets)
 	for i := range sources {
 		if sources[i].Kind == config.KindOllama {
-			return downloadBudget{}
+			return downloadBudget{commits: out.commits}
 		}
 		if u := urlForSource(sources[i]); u != "" {
 			urlList = append(urlList, u)
@@ -211,14 +226,7 @@ func (m *Manager) estimateDownloadBudget(ctx context.Context, cfg config.Config,
 	}
 
 	for i := range hfSources {
-		commit := resolveHFCommit(ctx, cfg, hfSources[i])
-		if commit != "" {
-			if out.commits == nil {
-				out.commits = make(map[int]string, len(hfSources))
-			}
-			out.commits[hfSources[i].Index] = commit
-		}
-		est, err := estimateHFSource(ctx, cfg, hfSources[i], commit)
+		est, err := estimateHFTarget(ctx, cfg, hfSources[i], targets[hfSources[i].Index])
 		if len(est.Entries) > 0 {
 			if out.trees == nil {
 				out.trees = make(map[int][]hfwrap.TreeEntry, len(hfSources))
@@ -258,21 +266,203 @@ func (b downloadBudget) givenUp() downloadBudget {
 	}
 }
 
-// resolveHFCommit returns the commit a source's revision names now, or
-// "" when it could not be resolved.
-func resolveHFCommit(ctx context.Context, cfg config.Config, source config.ModelSource) string {
-	c, err := hfwrap.ResolveCommit(ctx, hfwrap.Config{
-		Repo:     source.HFRepo,
-		Revision: source.HFRevision,
-		Token:    cfg.HFToken,
-		Endpoint: cfg.HFEndpoint,
-	})
-	if err != nil {
-		slog.Debug("hf revision not resolved; downloading at the revision as given",
-			slog.String("repo", source.HFRepo), slog.String("revision", source.HFRevision), slog.String("err", err.Error()))
+// hfTarget is what the budget learned about one hf:// source before
+// sizing it: the commit its revision resolved to ("" when it did not),
+// and for a source naming one file, that file as the HEAD described it.
+type hfTarget struct {
+	commit string
+	entry  *hfwrap.TreeEntry
+}
+
+func commitsOf(targets map[int]hfTarget) map[int]string {
+	var commits map[int]string
+	for idx, t := range targets {
+		if t.commit == "" {
+			continue
+		}
+		if commits == nil {
+			commits = make(map[int]string, len(targets))
+		}
+		commits[idx] = t.commit
+	}
+	return commits
+}
+
+// resolveHFTargets resolves every hf:// source, by segment index.
+//
+// A repo and revision is resolved once per pass. A main GGUF and its
+// projector usually share one, and the second source then only needs
+// its size, asked at the commit the first resolved to so both files
+// come from one revision. A revision that could not be resolved is not
+// tried again for the next source: the remote just failed every attempt.
+func (m *Manager) resolveHFTargets(ctx context.Context, cfg config.Config, sources []config.ModelSource) map[int]hfTarget {
+	targets := make(map[int]hfTarget)
+	resolved := make(map[string]string)
+	for i := range sources {
+		src := sources[i]
+		if src.Kind != config.KindHF {
+			continue
+		}
+		key := src.HFRepo + "@" + src.HFRevision
+		commit, done := resolved[key]
+		if !done {
+			targets[src.Index] = m.resolveHFTarget(ctx, cfg, src)
+			resolved[key] = targets[src.Index].commit
+			continue
+		}
+		t := hfTarget{commit: commit}
+		if file := singleHFFile(src); file != "" && commit != "" {
+			if h, err := hfwrap.HeadFile(ctx, hfLookupConfig(cfg, src, commit, file)); err == nil && h.Commit == commit {
+				t.entry = sizedEntry(h.Entry)
+			}
+		}
+		targets[src.Index] = t
+	}
+	return targets
+}
+
+// hfResolveAttempts is how many lookups a revision gets before the
+// remote counts as unreachable for this pass.
+const hfResolveAttempts = 3
+
+// hfHeadGrace is how long an attempt that already has the commit from
+// the revision API still waits for the HEAD, whose answer also sizes
+// the file.
+const hfHeadGrace = 3 * time.Second
+
+// resolveHFTarget looks up the commit a source's revision names now.
+// A target without a commit means every attempt failed: runHF then
+// downloads at the revision as given, and hf falls back to the snapshot
+// refs/<revision> points at if it cannot reach the remote either.
+func (m *Manager) resolveHFTarget(ctx context.Context, cfg config.Config, source config.ModelSource) hfTarget {
+	file := singleHFFile(source)
+	wait := m.opts.HFResolveBackoff
+	for attempt := 1; ; attempt++ {
+		t, err := lookupHFTarget(ctx, cfg, source, file)
+		if err == nil {
+			return t
+		}
+		if attempt == hfResolveAttempts {
+			slog.Warn("remote unreachable: hf revision not resolved; a cached snapshot may be used instead",
+				slog.String("repo", source.HFRepo),
+				slog.String("revision", source.HFRevision),
+				slog.Int("attempts", attempt),
+				slog.String("err", err.Error()))
+			return hfTarget{}
+		}
+		slog.Warn("hf revision lookup failed, retrying",
+			slog.String("repo", source.HFRepo),
+			slog.String("revision", source.HFRevision),
+			slog.Int("attempt", attempt),
+			slog.Int("attempts", hfResolveAttempts),
+			slog.String("err", err.Error()))
+		select {
+		case <-ctx.Done():
+			return hfTarget{}
+		case <-time.After(wait):
+		}
+		wait *= 2
+	}
+}
+
+// lookupHFTarget is one attempt. It asks the revision API and, when the
+// source names one file, HEADs that file, both at once: asked one after
+// the other, an unreachable remote cost two timeouts per attempt.
+func lookupHFTarget(ctx context.Context, cfg config.Config, source config.ModelSource, file string) (hfTarget, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		target hfTarget
+		err    error
+		head   bool
+	}
+	answers := make(chan answer, 2)
+	pending := 1
+	go func() {
+		c, err := hfwrap.ResolveCommit(ctx, hfLookupConfig(cfg, source, source.HFRevision, ""))
+		answers <- answer{target: hfTarget{commit: c}, err: err}
+	}()
+	if file != "" {
+		pending++
+		go func() {
+			h, err := hfwrap.HeadFile(ctx, hfLookupConfig(cfg, source, source.HFRevision, file))
+			answers <- answer{target: hfTarget{commit: h.Commit, entry: sizedEntry(h.Entry)}, err: err, head: true}
+		}()
+	}
+
+	var fromAPI *hfTarget
+	var errs []error
+	var grace <-chan time.Time
+	for pending > 0 {
+		select {
+		case a := <-answers:
+			pending--
+			switch {
+			case a.err != nil:
+				errs = append(errs, a.err)
+			case a.head || pending == 0:
+				return a.target, nil
+			default:
+				fromAPI = &a.target
+				grace = time.After(hfHeadGrace)
+			}
+		case <-grace:
+			return *fromAPI, nil
+		}
+	}
+	if fromAPI != nil {
+		return *fromAPI, nil
+	}
+	return hfTarget{}, errors.Join(errs...)
+}
+
+// singleHFFile is the one file a source downloads by name, or "" when
+// a HEAD on it would not describe everything the source fetches: a
+// pattern, a --subdir the tree walk filters by, or an --exclude that
+// drops it.
+func singleHFFile(ms config.ModelSource) string {
+	if len(ms.HFInclude) != 1 || ms.HFSubdir != "" {
 		return ""
 	}
-	return c
+	f := strings.TrimPrefix(strings.TrimSpace(ms.HFInclude[0]), "/")
+	if f == "" || strings.ContainsAny(f, "*?[") || !hfwrap.MatchPatterns(f, nil, ms.HFExclude) {
+		return ""
+	}
+	return f
+}
+
+func hfLookupConfig(cfg config.Config, src config.ModelSource, revision, file string) hfwrap.Config {
+	return hfwrap.Config{
+		Repo:     src.HFRepo,
+		Revision: revision,
+		Token:    cfg.HFToken,
+		Endpoint: cfg.HFEndpoint,
+		HFFile:   file,
+	}
+}
+
+// sizedEntry keeps a HEAD's description only when it carried a size;
+// without one the budget lists the tree instead.
+func sizedEntry(e hfwrap.TreeEntry) *hfwrap.TreeEntry {
+	if e.Size <= 0 {
+		return nil
+	}
+	return &e
+}
+
+// estimateHFTarget sizes one source from its HEAD when that answered,
+// and from the tree at the resolved commit otherwise.
+func estimateHFTarget(ctx context.Context, cfg config.Config, source config.ModelSource, t hfTarget) (hfwrap.RepoEstimate, error) {
+	if t.entry != nil {
+		return hfwrap.RepoEstimate{
+			Bytes:    t.entry.Size,
+			Files:    1,
+			Complete: true,
+			Entries:  []hfwrap.TreeEntry{*t.entry},
+			Commit:   t.commit,
+		}, nil
+	}
+	return estimateHFSource(ctx, cfg, source, t.commit)
 }
 
 func estimateHFSource(ctx context.Context, cfg config.Config, source config.ModelSource, commit string) (hfwrap.RepoEstimate, error) {

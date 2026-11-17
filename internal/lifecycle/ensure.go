@@ -325,8 +325,11 @@ func (m *Manager) runHF(ctx context.Context, cfg config.Config, ms config.ModelS
 	// MODEL_SOURCE is untouched: the next pass resolves the branch anew.
 	rev := ms.HFRevision
 	commit := m.pass.hfCommit(ms)
+	var cached string
 	if commit != "" {
 		rev = commit
+	} else {
+		cached, _ = hfwrap.ReadRefCommit(m.hfCacheRoot(), ms.HFRepo, ms.HFRevision)
 	}
 
 	slog.Info("hf download starting",
@@ -371,6 +374,19 @@ func (m *Manager) runHF(ctx context.Context, cfg config.Config, ms config.ModelS
 				Inc()
 		}
 		return hfwrap.Result{}, m.fail(hfUserMessage(err), retriable)
+	}
+	if cached != "" && res.Commit == cached {
+		// hf answers from refs/<revision> when it cannot reach the
+		// remote, and exits 0 as if it had confirmed the snapshot. It
+		// says nothing either way, and the same commit also comes back
+		// when hf did reach the remote and nothing changed, so this
+		// states what is known rather than which one happened.
+		slog.Warn("hf revision not confirmed before the download; hf returned the cached commit, which may be out of date",
+			slog.Int("source_index", ms.Index),
+			slog.String("repo", ms.HFRepo),
+			slog.String("revision", ms.HFRevision),
+			slog.String("cached_commit", cached),
+			slog.Int("resolve_attempts", hfResolveAttempts))
 	}
 	if rev != ms.HFRevision {
 		// hf only writes refs/<branch> when it resolves the branch

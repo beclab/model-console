@@ -166,6 +166,86 @@ func TestResolveCommit(t *testing.T) {
 	}
 }
 
+// The Olares mirror has refused the revision API while serving the
+// file HEAD hf makes; the lookup must agree with what hf would see.
+func TestResolveCommit_FallsBackToFileHead(t *testing.T) {
+	t.Parallel()
+	const commit = "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/models/o/r/revision/main":
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		case r.Method == http.MethodHead && r.URL.Path == "/o/r/resolve/main/dir/m.gguf":
+			w.Header().Set("X-Repo-Commit", commit)
+			w.Header().Set("Location", "/cdn/blob")
+			w.WriteHeader(http.StatusFound)
+		case r.Method == http.MethodHead && r.URL.Path == "/o/r/resolve/main/nocommit.gguf":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+
+	if got, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL, HFFile: "dir/m.gguf"}); err != nil || got != commit {
+		t.Fatalf("head fallback: %q %v, want %s", got, err, commit)
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL}); err == nil {
+		t.Error("with no file to HEAD, a refused revision API must be an error")
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL, HFFile: "nocommit.gguf"}); err == nil {
+		t.Error("a HEAD without X-Repo-Commit must be an error")
+	}
+	if _, err := ResolveCommit(ctx, Config{Repo: "o/r", Endpoint: srv.URL, HFFile: "*.gguf"}); err == nil {
+		t.Error("a glob names no file to HEAD")
+	}
+}
+
+func TestHeadFile(t *testing.T) {
+	t.Parallel()
+	const (
+		commit = "4af51b3542f775b0a8e4b310bfb3f17e01c306c9"
+		lfs    = "2a5f3565f39cf885103da591182c1266da64745737b42b452fd3e675369f1211"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Repo-Commit", commit)
+		switch r.URL.Path {
+		case "/hub/r/resolve/main/m.gguf":
+			w.Header().Set("X-Linked-Size", "17659407264")
+			w.Header().Set("X-Linked-ETag", `"`+lfs+`"`)
+			w.Header().Set("Location", "/cdn")
+			w.WriteHeader(http.StatusFound)
+		case "/mirror/r/resolve/main/m.gguf":
+			w.Header().Set("ETag", `"cea1c0a4a12e28b117e5137684d9fe85-10"`)
+			w.Header().Set("Content-Length", "17659407264")
+		case "/bare/r/resolve/main/m.gguf":
+			w.Header().Set("Location", "/cdn")
+			w.WriteHeader(http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	ctx := context.Background()
+
+	hub, err := HeadFile(ctx, Config{Repo: "hub/r", Endpoint: srv.URL, HFFile: "m.gguf"})
+	if err != nil || hub.Commit != commit || hub.Entry.Size != 17659407264 || hub.Entry.BlobID != lfs || hub.Entry.SHA256 != lfs {
+		t.Errorf("hub redirect: %+v %v", hub, err)
+	}
+	mirror, err := HeadFile(ctx, Config{Repo: "mirror/r", Endpoint: srv.URL, HFFile: "m.gguf"})
+	if err != nil || mirror.Commit != commit || mirror.Entry.Size != 17659407264 || mirror.Entry.BlobID != "" {
+		t.Errorf("mirror 200: %+v %v, want the size and no blob id", mirror, err)
+	}
+	bare, err := HeadFile(ctx, Config{Repo: "bare/r", Endpoint: srv.URL, HFFile: "m.gguf"})
+	if err != nil || bare.Entry.Size != 0 {
+		t.Errorf("a redirect's own length is not the file's: %+v %v", bare, err)
+	}
+	if _, err := HeadFile(ctx, Config{Repo: "hub/r", Endpoint: srv.URL, HFFile: "*.gguf"}); err == nil {
+		t.Error("a glob names no file to HEAD")
+	}
+}
+
 func TestEstimateRepo_CommitOnlyWhenListedAtOne(t *testing.T) {
 	t.Parallel()
 	const commit = "50968a4468ef4233ed78cd7c3de230dd1d61a56b"

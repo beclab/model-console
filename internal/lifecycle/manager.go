@@ -116,6 +116,17 @@ type Options struct {
 	// regardless of this value.
 	RetriableBackoff time.Duration
 
+	// HFResolveBackoff is the wait after the first failed lookup of an
+	// hf:// revision, doubled after the second. Defaults to 2s.
+	HFResolveBackoff time.Duration
+
+	// MetadataBudget bounds everything a pass asks the remote before it
+	// starts downloading: resolving revisions and sizing the files. When
+	// it runs out the pass downloads without a pinned total. New defaults
+	// it to 90s, which covers hfResolveAttempts lookups that each time
+	// out; zero on a Manager built without New means no budget.
+	MetadataBudget time.Duration
+
 	// NowFunc is the time source. Defaults to time.Now.
 	NowFunc func() time.Time
 
@@ -211,6 +222,12 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.RetriableBackoff == 0 {
 		opts.RetriableBackoff = 30 * time.Second
+	}
+	if opts.HFResolveBackoff == 0 {
+		opts.HFResolveBackoff = 2 * time.Second
+	}
+	if opts.MetadataBudget == 0 {
+		opts.MetadataBudget = 90 * time.Second
 	}
 	if opts.NowFunc == nil {
 		opts.NowFunc = time.Now

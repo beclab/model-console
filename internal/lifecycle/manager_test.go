@@ -237,6 +237,7 @@ func baseOptions(t *testing.T, sources []config.ModelSource) Options {
 		Downloader:             &fakeDownloader{},
 		MaxConcurrentDownloads: 2,
 		RetriableBackoff:       10 * time.Millisecond,
+		HFResolveBackoff:       time.Millisecond,
 		NowFunc:                time.Now,
 	}
 }

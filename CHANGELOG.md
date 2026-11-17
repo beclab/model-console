@@ -150,6 +150,31 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
   branch anew, and if the revision cannot be resolved the pass downloads
   at the revision as given, as before. With the total pinned, `bytes_completed` is also capped at
   `bytes_total`, with one warning per pass if a producer overruns it.
+- An hf:// source that cannot reach the remote no longer runs a stale model
+  without a word. `hf download` answers from the snapshot `refs/<revision>`
+  names when its own lookup fails and exits 0, so a moved branch behind a
+  flaky mirror kept serving the old model as if the remote had confirmed
+  it. The revision is now looked up three times, two and then four seconds
+  apart, before the remote counts as unreachable, falling back to the
+  `X-Repo-Commit` of a HEAD on the requested file when the revision API
+  refuses. Once the remote is unreachable the cached snapshot is still
+  used, but the log says so twice: when the lookups give up, and when hf
+  returns the commit the cache already held.
+- An hf:// source that names one file is now sized by a HEAD on that file,
+  which also gives the commit, instead of the revision and tree APIs. The
+  Olares mirror was answering `/api/` with a 401 after fifteen seconds while
+  serving the HEAD, so a Qwen3.8-27B upgrade sat on "Estimating size" for
+  two minutes and then listed only the projector it was downloading. A
+  repo and revision is also resolved once per pass, so a main GGUF and its
+  projector come from one commit for one lookup. Pattern and `--subdir`
+  sources still list the tree.
+- Looking up an hf revision before a download no longer takes up to two
+  minutes against an unreachable remote. Each attempt now asks the file
+  HEAD and the revision API at once instead of one after the other, and
+  everything asked before the download shares a 90-second budget, after
+  which the download starts without a pinned total. The warning when hf
+  returns the cached commit no longer claims the remote was unreachable:
+  the same commit comes back when nothing changed upstream.
 
 - The model card's `extensions.capacity` now follows an engine whose pod an
   upgrade replaced. The capacity reporter re-read the engine only on a
