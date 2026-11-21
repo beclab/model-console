@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -905,5 +906,66 @@ func TestReconcileModelSpecFile_NoWarnWhenCardMatchesChartSeed(t *testing.T) {
 	})
 	if strings.Contains(logs, "disk wins") {
 		t.Errorf("identical args must not warn, got: %s", logs)
+	}
+}
+
+// An audio card on the shared cache outlives the application, so a reinstall
+// that declares more capabilities met the first install's card. Its supports
+// follow MODEL_SUPPORTS, which is what the engine mounts its routes from;
+// the rest of the card is still the disk's.
+func TestReconcileModelSpecFile_AudioSupportsFollowTheEnv(t *testing.T) {
+	t.Parallel()
+	path := writeSpec(t, `{"name":"disk","mode":"audio","supports":{"supports_stt":true},"engine_args":""}`)
+	want := parseSupportsCSV("supports_stt,supports_diar")
+	cfg := &Config{
+		Runtime: Runtime{ModelSpecPath: path},
+		Engine:  Engine{Kind: EngineAudio},
+		Spec:    ModelSpec{Name: "seed", Mode: "audio", Supports: maps.Clone(want)},
+	}
+	if err := ReconcileModelSpecFile(cfg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !maps.Equal(cfg.Spec.Supports, want) {
+		t.Errorf("supports = %v, want %v", cfg.Spec.Supports, want)
+	}
+	got, err := LoadModelSpecFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !maps.Equal(got.Supports, want) || got.Name != "disk" {
+		t.Errorf("disk card = %+v, want the env's supports written through and the disk's name kept", got)
+	}
+}
+
+// Only audio cards: other engines' supports are edited through Router, and
+// disk wins for them. An audio deployment without MODEL_SUPPORTS keeps its
+// card.
+func TestReconcileModelSpecFile_AudioSupportsOverlayIsAudioOnly(t *testing.T) {
+	t.Parallel()
+	for name, cfg := range map[string]*Config{
+		"chat engine": {
+			Engine: Engine{Kind: EngineLlamaCpp},
+			Spec:   ModelSpec{Mode: "chat", Supports: parseSupportsCSV("supports_vision")},
+		},
+		"audio without MODEL_SUPPORTS": {
+			Engine: Engine{Kind: EngineAudio},
+			Spec:   ModelSpec{Mode: "audio"},
+		},
+	} {
+		disk := `{"name":"disk","mode":"chat","supports":{"supports_reasoning":true}}`
+		if cfg.Engine.Kind == EngineAudio {
+			disk = `{"name":"disk","mode":"audio","supports":{"supports_stt":true},"engine_args":""}`
+		}
+		cfg.Runtime.ModelSpecPath = writeSpec(t, disk)
+		var before ModelSpec
+		if err := json.Unmarshal([]byte(disk), &before); err != nil {
+			t.Fatal(err)
+		}
+		if err := ReconcileModelSpecFile(cfg); err != nil {
+			t.Fatalf("%s: reconcile: %v", name, err)
+		}
+		if !maps.Equal(cfg.Spec.Supports, before.Supports) {
+			t.Errorf("%s: supports = %v, want the disk's %v", name, cfg.Spec.Supports, before.Supports)
+		}
 	}
 }
