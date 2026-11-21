@@ -130,6 +130,13 @@ and the project adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.
 
 ### Fixed
 
+- An audio card's `supports` now follow `MODEL_SUPPORTS` on every boot. The
+  card sits on the shared cache and outlives the application, so a reinstall
+  or a chart that added a capability kept the first install's supports:
+  Router routed only those while the engine, which mounts its routes from
+  the env, served more, and the card could not be corrected at runtime
+  because audio supports are refused there. This is a third exception to
+  disk-wins, for audio engines only; other cards keep theirs.
 - The model card's `extensions.capacity` now follows an engine whose pod an
   upgrade replaced. The capacity reporter re-read the engine only on a
   readiness dip or a relaunch this process asked for, and a replaced pod

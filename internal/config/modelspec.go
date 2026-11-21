@@ -320,6 +320,9 @@ func ReconcileModelSpecFile(cfg *Config) error {
 		if overlayReasoningEffortRuleFromEnv(&spec) {
 			rewrote = true
 		}
+		if overlayAudioSupportsFromEnv(cfg, &spec) {
+			rewrote = true
+		}
 		// One-shot backfill only when the on-disk JSON lacks the
 		// engine_args key entirely (legacy files). An explicit empty
 		// string (or null) means the operator cleared the card — do not

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 
@@ -361,6 +362,24 @@ func reasoningEffortRuleFromEnv(g Getenv) (*ParameterRule, error) {
 		rule.Default = def
 	}
 	return &rule, nil
+}
+
+// overlayAudioSupportsFromEnv makes MODEL_SUPPORTS authoritative for an
+// audio engine's supports on an existing card. Returns true when spec was
+// mutated.
+//
+// An audio card's supports cannot be edited at runtime (runtimecfg refuses
+// it): the engine mounts its routes from MODEL_SUPPORTS, so the card has to
+// say the same. The card outlives the application on the shared cache, so
+// without this a reinstall or a chart that adds a capability keeps the old
+// card, and Router routes only what the first install declared while the
+// engine serves more. An unset MODEL_SUPPORTS leaves the card alone.
+func overlayAudioSupportsFromEnv(cfg *Config, spec *ModelSpec) bool {
+	if cfg.Engine.Kind != EngineAudio || len(cfg.Spec.Supports) == 0 || maps.Equal(spec.Supports, cfg.Spec.Supports) {
+		return false
+	}
+	spec.Supports = maps.Clone(cfg.Spec.Supports)
+	return true
 }
 
 // overlayReasoningEffortRuleFromEnv makes the chart authoritative for the
