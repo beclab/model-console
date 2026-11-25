@@ -78,6 +78,25 @@ relaunches the API server when Model Console changes engine arguments.
 The NVIDIA manual-test chart and build instructions are in
 [strataqwen38iq4xsv3/README.md](strataqwen38iq4xsv3/README.md).
 
+### ComfyUI text-to-image
+
+To publish H3 Image, start `llm-init` with `ENGINE_KIND=comfyui`,
+`MODEL_MODE=image`, and `MODEL_NAME=h3-image`. Set `COMFY_MODELS_DIR` to the
+ComfyUI weights directory. In the JSON file selected by `COMFY_APP_CONFIG`, declare
+one `apiWorkflows` entry with the Studio flow `id` (H3 uses `t2i`), its supported
+`aspectRatios`, a `defaultAspect` from that list, and its `resolution` (`2K`).
+Supply a shared secret of at least 32 bytes as `COMFY_API_TOKEN` and as
+`LLM_GATEWAY_PROVIDER_STUDIO_MEDIA_TOKEN` in Router.
+
+Router discovers the model at `GET /api/model-spec` and checks readiness at
+`GET /api/progress`. Once ready, `POST /api/v1/generations` creates a Studio job
+as the authenticated user and returns HTTP 202 with the Studio job ID. Router
+polls `GET /api/v1/generations/{id}` and downloads a completed image from
+`GET /api/v1/generations/{id}/content?outputId=…`. Easy UI shows the same job.
+
+For a weight-download console, start `llm-init comfyui`. This entrypoint
+serves download progress and model-group management.
+
 ## Development
 
 Go 1.23 or newer is required by the module. The release and security checks use

@@ -141,6 +141,9 @@ var staticFS embed.FS
 // mount it under any prefix (the design uses /console/).
 func (c *Console) Handler() http.Handler {
 	m := http.NewServeMux()
+	if c.opts.Media != nil {
+		c.registerMedia(m)
+	}
 	m.HandleFunc("GET /api/status", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, c.Status())
 	})

@@ -22,6 +22,7 @@ const (
 	EngineRerank          EngineKind = "rerank"
 	EngineMusic           EngineKind = "music"
 	EngineSystemOne       EngineKind = "systemone"
+	EngineComfyUI         EngineKind = "comfyui"
 )
 
 // AllEngineKinds lists every supported engine; used for env validation.
@@ -85,6 +86,7 @@ const (
 	ModelTranslate       ModelType = "translate"
 	ModelMusicGeneration ModelType = "music_generation"
 	ModelSystemOne       ModelType = "system_one"
+	ModelImage           ModelType = "image"
 )
 
 // Defaults applied when the corresponding env is unset.
