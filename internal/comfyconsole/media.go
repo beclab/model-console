@@ -17,6 +17,9 @@ import (
 )
 
 const (
+	operationGenerate   = "generate"
+	operationEdit       = "edit"
+	operationFirstFrame = "first_last_frame"
 	mediaContract       = "studio-v1"
 	generationQueued    = "queued"
 	generationCompleted = "completed"
@@ -32,6 +35,7 @@ var (
 // APIWorkflow describes the text-driven workflow exposed by this app.
 type APIWorkflow struct {
 	ID            string         `json:"id"`
+	Operation     string         `json:"operation,omitempty"`
 	AspectRatios  []string       `json:"aspectRatios"`
 	DefaultAspect string         `json:"defaultAspect"`
 	Resolution    string         `json:"resolution"`
@@ -47,10 +51,11 @@ type videoDuration struct {
 
 // MediaConfig binds an installed model to its Studio workflow.
 type MediaConfig struct {
-	name     string
-	mode     config.ModelType
-	token    string
-	workflow APIWorkflow
+	name       string
+	mode       config.ModelType
+	token      string
+	workflows  map[string]APIWorkflow
+	operations []string
 }
 
 // NewMediaConfig validates the settings used to publish a model to Router.
@@ -65,23 +70,58 @@ func NewMediaConfig(cfg *AppConfig, name, mode, token string) (*MediaConfig, err
 	if len(token) < 32 {
 		return nil, errors.New("COMFY_API_TOKEN must be at least 32 characters")
 	}
-	if len(cfg.APIWorkflows) != 1 {
-		return nil, errors.New("app config must declare one apiWorkflows entry")
-	}
-	flow := cfg.APIWorkflows[0]
-	if !groupIDRe.MatchString(flow.ID) || flow.Resolution == "" || flow.DefaultAspect == "" || !slices.Contains(flow.AspectRatios, flow.DefaultAspect) {
-		return nil, errors.New("apiWorkflows entry requires a valid ID, resolution, and supported default aspect ratio")
-	}
-	if mediaMode == config.ModelVideo {
-		if !slices.Contains(flow.Resolutions, flow.Resolution) {
-			return nil, errors.New("the default video resolution must be one of the declared resolutions")
+	media := &MediaConfig{name: name, mode: mediaMode, token: token, workflows: make(map[string]APIWorkflow)}
+	seenIDs := make(map[string]bool)
+	for _, flow := range cfg.APIWorkflows {
+		if flow.Operation == "" {
+			flow.Operation = operationGenerate
 		}
+		if err := flow.validate(mediaMode); err != nil {
+			return nil, err
+		}
+		if _, exists := media.workflows[flow.Operation]; exists || seenIDs[flow.ID] {
+			return nil, errors.New("apiWorkflows must have distinct workflow IDs and operations")
+		}
+		media.workflows[flow.Operation] = flow
+		media.operations = append(media.operations, flow.Operation)
+		seenIDs[flow.ID] = true
+	}
+	if _, exists := media.workflows[operationGenerate]; !exists {
+		return nil, errors.New("apiWorkflows must publish a generate workflow")
+	}
+	return media, nil
+}
+
+func (flow APIWorkflow) validate(mode config.ModelType) error {
+	switch flow.Operation {
+	case operationGenerate:
+		if !slices.Contains(flow.AspectRatios, flow.DefaultAspect) || flow.DefaultAspect == "" {
+			return errors.New("the generate workflow requires a supported default aspect ratio")
+		}
+	case operationEdit:
+		if mode != config.ModelImage {
+			return errors.New("the edit workflow requires an image model")
+		}
+	case operationFirstFrame:
+		if mode != config.ModelVideo {
+			return errors.New("the frame workflow requires a video model")
+		}
+	default:
+		return fmt.Errorf("unsupported Studio workflow operation %q", flow.Operation)
+	}
+	if !groupIDRe.MatchString(flow.ID) || flow.Resolution == "" {
+		return errors.New("apiWorkflows entry requires a valid ID and resolution")
+	}
+	if len(flow.Resolutions) != 0 && !slices.Contains(flow.Resolutions, flow.Resolution) {
+		return errors.New("the default resolution must be one of the declared resolutions")
+	}
+	if mode == config.ModelVideo {
 		duration := flow.Duration
 		if duration == nil || duration.Min <= 0 || duration.Default < duration.Min || duration.Default > duration.Max {
-			return nil, errors.New("the video workflow requires valid durationSeconds limits and default")
+			return errors.New("the video workflow requires valid durationSeconds limits and default")
 		}
 	}
-	return &MediaConfig{name: name, mode: mediaMode, token: token, workflow: flow}, nil
+	return nil
 }
 
 func (c *Console) registerMedia(mux *http.ServeMux) {
@@ -92,16 +132,28 @@ func (c *Console) registerMedia(mux *http.ServeMux) {
 	} else {
 		fields = append(fields, "n", "output.size")
 	}
+	workflows := make(map[string]string, len(media.workflows))
+	for operation, flow := range media.workflows {
+		workflows[operation] = flow.ID
+	}
+	if len(workflows) > 1 {
+		fields = append(fields, "inputs.images")
+	}
+	if _, exists := workflows[operationEdit]; exists {
+		fields = append(fields, "inputs.mask")
+	}
 	mux.HandleFunc("GET /api/model-spec", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, config.ModelSpec{
 			Name: media.name,
 			Mode: string(media.mode) + "_generation",
 			Extensions: map[string]any{
 				"creative": map[string]any{
-					"media": string(media.mode), "operations": []string{"generate"},
+					"media": string(media.mode), "operations": media.operations,
 					"canonical_fields": fields,
 				},
-				"model_console_media": map[string]string{"protocol": mediaContract, "workflow_id": media.workflow.ID},
+				"model_console_media": map[string]any{
+					"protocol": mediaContract, "workflow_id": workflows[operationGenerate], "workflows": workflows,
+				},
 			},
 		})
 	})
@@ -140,8 +192,9 @@ func (c *Console) requireMediaUser(handler func(http.ResponseWriter, *http.Reque
 }
 
 type generationRequest struct {
-	WorkflowID string `json:"workflowId"`
-	Prompt     string `json:"prompt"`
+	WorkflowID string            `json:"workflowId"`
+	Prompt     string            `json:"prompt"`
+	Inputs     *generationInputs `json:"inputs,omitempty"`
 	Params     struct {
 		AspectRatio string  `json:"aspectRatio"`
 		Resolution  string  `json:"resolution"`
@@ -169,57 +222,47 @@ type studioJob struct {
 
 func (c *Console) createGeneration(w http.ResponseWriter, r *http.Request, user string) {
 	var in generationRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, studioMediaBodyLimit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&in); err != nil || decoder.Decode(new(any)) != io.EOF {
 		mediaError(w, http.StatusBadRequest, "invalid_request", "Invalid generation request")
 		return
 	}
 	media := c.opts.Media
-	flow := media.workflow
-	if in.WorkflowID != flow.ID || strings.TrimSpace(in.Prompt) == "" {
+	var flow APIWorkflow
+	for _, candidate := range media.workflows {
+		if candidate.ID == in.WorkflowID {
+			flow = candidate
+			break
+		}
+	}
+	if flow.ID == "" || strings.TrimSpace(in.Prompt) == "" {
 		mediaError(w, http.StatusBadRequest, "invalid_workflow", "A published workflow and a prompt are required")
 		return
 	}
-	aspect := in.Params.AspectRatio
-	if aspect == "" {
-		aspect = flow.DefaultAspect
-	}
-	resolution := in.Params.Resolution
-	if resolution == "" {
-		resolution = flow.Resolution
-	}
-	resolutionOK := resolution == flow.Resolution
-	if media.mode == config.ModelVideo {
-		resolutionOK = slices.Contains(flow.Resolutions, resolution)
-	}
-	if !slices.Contains(flow.AspectRatios, aspect) || !resolutionOK {
-		mediaError(w, http.StatusBadRequest, "invalid_params", "The requested aspect ratio or resolution is unsupported")
+	params, err := flow.generationParams(in, media.mode)
+	if err != nil {
+		mediaError(w, http.StatusBadRequest, "invalid_params", err.Error())
 		return
-	}
-	params := map[string]any{"aspect": aspect, "resolution": resolution}
-	if media.mode == config.ModelVideo {
-		duration := flow.Duration.Default
-		if in.Params.Duration != nil {
-			duration = *in.Params.Duration
-		}
-		if duration < flow.Duration.Min || duration > flow.Duration.Max {
-			mediaError(w, http.StatusBadRequest, "invalid_params", "The requested duration is unsupported")
-			return
-		}
-		params["duration"] = duration
-	} else if in.Params.Duration != nil {
-		mediaError(w, http.StatusBadRequest, "invalid_params", "Duration is only supported for video")
-		return
-	}
-	if in.Params.Seed != nil {
-		params["seed"] = *in.Params.Seed
 	}
 	if !c.Status().Ready {
 		mediaError(w, http.StatusServiceUnavailable, "model_not_ready", "Model weights or Studio are still starting")
 		return
 	}
-	body, err := json.Marshal(map[string]any{"mode": flow.ID, "prompt": in.Prompt, "params": params})
+	inputs, err := prepareGenerationInputs(in.Inputs, flow.Operation)
+	if err != nil {
+		mediaError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	job := map[string]any{"mode": flow.ID, "prompt": in.Prompt, "params": params}
+	if len(inputs) != 0 {
+		assets, ok := c.uploadGenerationInputs(w, r, user, inputs)
+		if !ok {
+			return
+		}
+		job["assets"] = assets
+	}
+	body, err := json.Marshal(job)
 	if err != nil {
 		mediaError(w, http.StatusInternalServerError, "generation_failed", "Could not encode Studio request")
 		return
@@ -237,6 +280,44 @@ func (c *Console) createGeneration(w http.ResponseWriter, r *http.Request, user 
 	if gen, ok := result.Jobs[0].generation(w); ok {
 		writeJSON(w, http.StatusAccepted, gen)
 	}
+}
+
+func (flow APIWorkflow) generationParams(in generationRequest, mode config.ModelType) (map[string]any, error) {
+	aspect := in.Params.AspectRatio
+	if aspect == "" {
+		aspect = flow.DefaultAspect
+	}
+	resolution := in.Params.Resolution
+	if resolution == "" {
+		resolution = flow.Resolution
+	}
+	resolutionOK := resolution == flow.Resolution
+	if len(flow.Resolutions) != 0 {
+		resolutionOK = slices.Contains(flow.Resolutions, resolution)
+	}
+	if (aspect != "" && !slices.Contains(flow.AspectRatios, aspect)) || !resolutionOK {
+		return nil, errors.New("the requested aspect ratio or resolution is unsupported")
+	}
+	params := map[string]any{"resolution": resolution}
+	if aspect != "" {
+		params["aspect"] = aspect
+	}
+	if mode == config.ModelVideo {
+		duration := flow.Duration.Default
+		if in.Params.Duration != nil {
+			duration = *in.Params.Duration
+		}
+		if duration < flow.Duration.Min || duration > flow.Duration.Max {
+			return nil, errors.New("the requested duration is unsupported")
+		}
+		params["duration"] = duration
+	} else if in.Params.Duration != nil {
+		return nil, errors.New("duration is only supported for video")
+	}
+	if in.Params.Seed != nil {
+		params["seed"] = *in.Params.Seed
+	}
+	return params, nil
 }
 
 func (c *Console) getGeneration(w http.ResponseWriter, r *http.Request, user string) {
@@ -333,13 +414,17 @@ func (c *Console) studioJSON(w http.ResponseWriter, r *http.Request, user, metho
 }
 
 func (c *Console) studioCall(w http.ResponseWriter, r *http.Request, user, method, path string, body []byte) *http.Response {
-	req, err := http.NewRequestWithContext(r.Context(), method, c.opts.ComfyURL+"/studio/api"+path, bytes.NewReader(body))
+	return c.studioRequest(w, r, user, method, path, "application/json", bytes.NewReader(body))
+}
+
+func (c *Console) studioRequest(w http.ResponseWriter, r *http.Request, user, method, path, contentType string, body io.Reader) *http.Response {
+	req, err := http.NewRequestWithContext(r.Context(), method, c.opts.ComfyURL+"/studio/api"+path, body)
 	if err != nil {
 		mediaError(w, http.StatusBadGateway, "studio_unavailable", "Could not prepare Studio request")
 		return nil
 	}
 	req.Header.Set("X-Bfl-User", user)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	resp, err := c.opts.StudioClient.Do(req)
 	if err != nil {
 		mediaError(w, http.StatusBadGateway, "studio_unavailable", "Could not reach Studio")
