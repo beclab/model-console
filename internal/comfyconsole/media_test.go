@@ -126,6 +126,77 @@ func TestStudioMediaGeneration(t *testing.T) {
 	}
 }
 
+func TestStudioVideoGeneration(t *testing.T) {
+	token := strings.Repeat("s", 32)
+	cfg := &AppConfig{APIWorkflows: []APIWorkflow{{
+		ID: "t2v", AspectRatios: []string{"16:9", "9:16"}, DefaultAspect: "16:9",
+		Resolution: "480p", Resolutions: []string{"480p", "720p"},
+		Duration: &videoDuration{Default: 5, Min: 2, Max: 15},
+	}}}
+	media, err := NewMediaConfig(cfg, "minimax-h3", "video", token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	studio := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/system_stats", "/studio/api/health":
+			w.WriteHeader(http.StatusOK)
+		case "/studio/api/jobs":
+			calls.Add(1)
+			var job struct {
+				Mode   string
+				Params map[string]any
+			}
+			err := json.NewDecoder(r.Body).Decode(&job)
+			if err != nil || r.Method != http.MethodPost || r.Header.Get("X-Bfl-User") != "alice" ||
+				job.Mode != "t2v" || job.Params["aspect"] != "16:9" ||
+				job.Params["resolution"] != "720p" || job.Params["duration"] != float64(8) {
+				t.Errorf("unexpected video job: %+v, %v", job, err)
+			}
+			_, _ = io.WriteString(w, `{"jobs":[{"id":"video-job","status":"queued"}]}`)
+		case "/studio/api/jobs/video-job":
+			_, _ = io.WriteString(w, `{"id":"video-job","status":"done","outputs":["mp4"]}`)
+		case "/studio/api/media/mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = io.WriteString(w, "mp4 bytes")
+		default:
+			t.Errorf("unexpected Studio request %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer studio.Close()
+
+	console := New(Options{Config: cfg, Media: media, ComfyURL: studio.URL})
+	console.backend.Store(console.probe(context.Background()))
+	handler := console.Handler()
+	request := func(method, path, body string, code int, contains string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("X-Model-Console-Token", token)
+		req.Header.Set("X-Model-Console-User", "alice")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != code || !strings.Contains(rec.Body.String(), contains) {
+			t.Fatalf("%s %s: status %d, body %s", method, path, rec.Code, rec.Body)
+		}
+		return rec
+	}
+	const create = "/api/v1/generations"
+	const body = `{"workflowId":"t2v","prompt":"cat","params":{"resolution":"720p","durationSeconds":8}}`
+	request("GET", "/api/model-spec", "", 200, `"mode":"video_generation"`)
+	request("POST", create, strings.Replace(body, ":8", ":1", 1), 400, "invalid_params")
+	request("POST", create, strings.Replace(body, ":8", ":5.5", 1), 400, "invalid_request")
+	request("POST", create, strings.Replace(body, "720p", "1080p", 1), 400, "invalid_params")
+	request("POST", create, strings.Replace(body, "t2v", "i2v", 1), 400, "invalid_workflow")
+	request("POST", create, body, 202, `"id":"video-job"`)
+	request("GET", create+"/video-job", "", 200, `"outputs":[{"id":"mp4"}]`)
+	out := request("GET", create+"/video-job/content?outputId=mp4", "", 200, "mp4 bytes")
+	if calls.Load() != 1 || out.Header().Get("Content-Type") != "video/mp4" {
+		t.Fatalf("Studio creates = %d, download headers = %v", calls.Load(), out.Header())
+	}
+}
+
 func TestStudioJobStates(t *testing.T) {
 	for studio, want := range map[string]string{
 		"queued": "queued", "running": "in_progress", "done": "completed",

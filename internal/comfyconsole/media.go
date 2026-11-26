@@ -29,17 +29,26 @@ var (
 	studioIDPattern   = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 )
 
-// APIWorkflow describes the text-to-image workflow exposed by this app.
+// APIWorkflow describes the text-driven workflow exposed by this app.
 type APIWorkflow struct {
-	ID            string   `json:"id"`
-	AspectRatios  []string `json:"aspectRatios"`
-	DefaultAspect string   `json:"defaultAspect"`
-	Resolution    string   `json:"resolution"`
+	ID            string         `json:"id"`
+	AspectRatios  []string       `json:"aspectRatios"`
+	DefaultAspect string         `json:"defaultAspect"`
+	Resolution    string         `json:"resolution"`
+	Resolutions   []string       `json:"resolutions,omitempty"`
+	Duration      *videoDuration `json:"durationSeconds,omitempty"`
 }
 
-// MediaConfig binds an installed image model to its Studio workflow.
+type videoDuration struct {
+	Default int `json:"default"`
+	Min     int `json:"min"`
+	Max     int `json:"max"`
+}
+
+// MediaConfig binds an installed model to its Studio workflow.
 type MediaConfig struct {
 	name     string
+	mode     config.ModelType
 	token    string
 	workflow APIWorkflow
 }
@@ -49,8 +58,9 @@ func NewMediaConfig(cfg *AppConfig, name, mode, token string) (*MediaConfig, err
 	if !modelNamePattern.MatchString(name) {
 		return nil, errors.New("MODEL_NAME must be a stable model identifier")
 	}
-	if mode != string(config.ModelImage) {
-		return nil, errors.New("MODEL_MODE must be image for the text-to-image API")
+	mediaMode := config.ModelType(mode)
+	if mediaMode != config.ModelImage && mediaMode != config.ModelVideo {
+		return nil, errors.New("MODEL_MODE must be image or video for the Studio API")
 	}
 	if len(token) < 32 {
 		return nil, errors.New("COMFY_API_TOKEN must be at least 32 characters")
@@ -62,19 +72,34 @@ func NewMediaConfig(cfg *AppConfig, name, mode, token string) (*MediaConfig, err
 	if !groupIDRe.MatchString(flow.ID) || flow.Resolution == "" || flow.DefaultAspect == "" || !slices.Contains(flow.AspectRatios, flow.DefaultAspect) {
 		return nil, errors.New("apiWorkflows entry requires a valid ID, resolution, and supported default aspect ratio")
 	}
-	return &MediaConfig{name: name, token: token, workflow: flow}, nil
+	if mediaMode == config.ModelVideo {
+		if !slices.Contains(flow.Resolutions, flow.Resolution) {
+			return nil, errors.New("the default video resolution must be one of the declared resolutions")
+		}
+		duration := flow.Duration
+		if duration == nil || duration.Min <= 0 || duration.Default < duration.Min || duration.Default > duration.Max {
+			return nil, errors.New("the video workflow requires valid durationSeconds limits and default")
+		}
+	}
+	return &MediaConfig{name: name, mode: mediaMode, token: token, workflow: flow}, nil
 }
 
 func (c *Console) registerMedia(mux *http.ServeMux) {
 	media := c.opts.Media
+	fields := []string{"prompt", "seed", "output.aspect_ratio", "output.resolution"}
+	if media.mode == config.ModelVideo {
+		fields = append(fields, "output.duration_seconds")
+	} else {
+		fields = append(fields, "n", "output.size")
+	}
 	mux.HandleFunc("GET /api/model-spec", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, config.ModelSpec{
 			Name: media.name,
-			Mode: "image_generation",
+			Mode: string(media.mode) + "_generation",
 			Extensions: map[string]any{
 				"creative": map[string]any{
-					"media": "image", "operations": []string{"generate"},
-					"canonical_fields": []string{"prompt", "n", "seed", "output.size", "output.aspect_ratio", "output.resolution"},
+					"media": string(media.mode), "operations": []string{"generate"},
+					"canonical_fields": fields,
 				},
 				"model_console_media": map[string]string{"protocol": mediaContract, "workflow_id": media.workflow.ID},
 			},
@@ -121,6 +146,7 @@ type generationRequest struct {
 		AspectRatio string  `json:"aspectRatio"`
 		Resolution  string  `json:"resolution"`
 		Seed        *uint64 `json:"seed"`
+		Duration    *int    `json:"durationSeconds"`
 	} `json:"params"`
 }
 
@@ -149,7 +175,8 @@ func (c *Console) createGeneration(w http.ResponseWriter, r *http.Request, user 
 		mediaError(w, http.StatusBadRequest, "invalid_request", "Invalid generation request")
 		return
 	}
-	flow := c.opts.Media.workflow
+	media := c.opts.Media
+	flow := media.workflow
 	if in.WorkflowID != flow.ID || strings.TrimSpace(in.Prompt) == "" {
 		mediaError(w, http.StatusBadRequest, "invalid_workflow", "A published workflow and a prompt are required")
 		return
@@ -158,17 +185,39 @@ func (c *Console) createGeneration(w http.ResponseWriter, r *http.Request, user 
 	if aspect == "" {
 		aspect = flow.DefaultAspect
 	}
-	if !slices.Contains(flow.AspectRatios, aspect) || (in.Params.Resolution != "" && in.Params.Resolution != flow.Resolution) {
+	resolution := in.Params.Resolution
+	if resolution == "" {
+		resolution = flow.Resolution
+	}
+	resolutionOK := resolution == flow.Resolution
+	if media.mode == config.ModelVideo {
+		resolutionOK = slices.Contains(flow.Resolutions, resolution)
+	}
+	if !slices.Contains(flow.AspectRatios, aspect) || !resolutionOK {
 		mediaError(w, http.StatusBadRequest, "invalid_params", "The requested aspect ratio or resolution is unsupported")
 		return
+	}
+	params := map[string]any{"aspect": aspect, "resolution": resolution}
+	if media.mode == config.ModelVideo {
+		duration := flow.Duration.Default
+		if in.Params.Duration != nil {
+			duration = *in.Params.Duration
+		}
+		if duration < flow.Duration.Min || duration > flow.Duration.Max {
+			mediaError(w, http.StatusBadRequest, "invalid_params", "The requested duration is unsupported")
+			return
+		}
+		params["duration"] = duration
+	} else if in.Params.Duration != nil {
+		mediaError(w, http.StatusBadRequest, "invalid_params", "Duration is only supported for video")
+		return
+	}
+	if in.Params.Seed != nil {
+		params["seed"] = *in.Params.Seed
 	}
 	if !c.Status().Ready {
 		mediaError(w, http.StatusServiceUnavailable, "model_not_ready", "Model weights or Studio are still starting")
 		return
-	}
-	params := map[string]any{"aspect": aspect, "resolution": flow.Resolution}
-	if in.Params.Seed != nil {
-		params["seed"] = *in.Params.Seed
 	}
 	body, err := json.Marshal(map[string]any{"mode": flow.ID, "prompt": in.Prompt, "params": params})
 	if err != nil {

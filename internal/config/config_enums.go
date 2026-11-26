@@ -87,6 +87,7 @@ const (
 	ModelMusicGeneration ModelType = "music_generation"
 	ModelSystemOne       ModelType = "system_one"
 	ModelImage           ModelType = "image"
+	ModelVideo           ModelType = "video"
 )
 
 // Defaults applied when the corresponding env is unset.
