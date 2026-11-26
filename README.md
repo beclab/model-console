@@ -78,18 +78,27 @@ relaunches the API server when Model Console changes engine arguments.
 The NVIDIA manual-test chart and build instructions are in
 [strataqwen38iq4xsv3/README.md](strataqwen38iq4xsv3/README.md).
 
-### ComfyUI text-to-image and text-to-video
+### ComfyUI Studio image and video
 
 To publish H3 Image, start `llm-init` with `ENGINE_KIND=comfyui`,
 `MODEL_MODE=image`, and `MODEL_NAME=h3-image`. Set `COMFY_MODELS_DIR` to the
 ComfyUI weights directory. In the JSON file selected by `COMFY_APP_CONFIG`, declare
-one `apiWorkflows` entry with the Studio flow `id` (H3 uses `t2i`), its supported
+a text `apiWorkflows` entry with the Studio flow `id` (H3 uses `t2i`), its supported
 `aspectRatios`, a `defaultAspect` from that list, and its `resolution` (`2K`).
-For MiniMax H3 use `MODEL_MODE=video`, `MODEL_NAME=minimax-h3`, and the
-`t2v` flow. Declare the supported `resolutions`, the default `resolution`,
+For Qwen Image 2.1 use `MODEL_NAME=qwen-image-2.1`. For MiniMax H3 and FastH3
+use `MODEL_MODE=video`, `MODEL_NAME=minimax-h3` or `fast-h3`, and the `t2v` flow. Declare the supported `resolutions`, the default `resolution`,
 and `durationSeconds` with whole-second `default`, `min`, and `max` values.
 Supply a shared secret of at least 32 bytes as `COMFY_API_TOKEN` and as
 `LLM_GATEWAY_PROVIDER_STUDIO_MEDIA_TOKEN` in Router.
+
+Additional `apiWorkflows` entries declare an `operation` and the Studio flow
+`id`. The Chart sets `maxImages` from the selected workflow.
+`edit` uses `inputs.images` and an optional `inputs.mask`. `first_last_frame`
+uses ordered `inputs.images`, starting with the first frame. `reference`
+uses reference `inputs.images` or one `inputs.video`, with optional
+`inputs.audio`. Use Base64 data URLs. Inputs may total up to 20 MiB decoded,
+with a 10 MiB limit per image. The video workflows apply their own clip
+duration limits.
 
 Router discovers the model at `GET /api/model-spec` and checks readiness at
 `GET /api/progress`. Once ready, `POST /api/v1/generations` creates a Studio job

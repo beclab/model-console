@@ -113,3 +113,41 @@ func TestStudioUploadsGenerationInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestReferenceInputsRequireVisualAssetAndKeepRoles(t *testing.T) {
+	const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zt9sAAAAASUVORK5CYII="
+	const video = "data:video/mp4;base64,Y2xpcA=="
+	const audio = "data:audio/wav;base64,c291bmQ="
+	reference := APIWorkflow{Operation: operationReference, MaxImages: 5}
+	frame := APIWorkflow{Operation: operationFirstFrame, MaxImages: 2}
+	for _, tc := range []struct {
+		name   string
+		flow   APIWorkflow
+		inputs generationInputs
+		roles  []string
+	}{
+		{"two ordered frames", frame, generationInputs{Images: []string{png, png}}, []string{"first_frame", "last_frame"}},
+		{"image, clip, and audio", reference, generationInputs{Images: []string{png}, Video: video, Audio: audio}, []string{"ref_image", "ref_video", "ref_audio"}},
+		{"audio alone", reference, generationInputs{Audio: audio}, nil},
+		{"video in frame operation", frame, generationInputs{Images: []string{png}, Video: video}, nil},
+		{"image labeled as video", reference, generationInputs{Video: png}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assets, err := prepareGenerationInputs(&tc.inputs, tc.flow)
+			if tc.roles == nil {
+				if err == nil {
+					t.Fatal("invalid asset combination was accepted")
+				}
+				return
+			}
+			if err != nil || len(assets) != len(tc.roles) {
+				t.Fatalf("assets = %v, err = %v", assets, err)
+			}
+			for idx, want := range tc.roles {
+				if assets[idx].role != want {
+					t.Errorf("asset %d role = %q, want %q", idx, assets[idx].role, want)
+				}
+			}
+		})
+	}
+}

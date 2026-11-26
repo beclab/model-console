@@ -20,6 +20,7 @@ const (
 	operationGenerate   = "generate"
 	operationEdit       = "edit"
 	operationFirstFrame = "first_last_frame"
+	operationReference  = "reference"
 	mediaContract       = "studio-v1"
 	generationQueued    = "queued"
 	generationCompleted = "completed"
@@ -34,6 +35,7 @@ var (
 
 // APIWorkflow describes the text-driven workflow exposed by this app.
 type APIWorkflow struct {
+	MaxImages     int            `json:"maxImages,omitempty"`
 	ID            string         `json:"id"`
 	Operation     string         `json:"operation,omitempty"`
 	AspectRatios  []string       `json:"aspectRatios"`
@@ -94,9 +96,12 @@ func NewMediaConfig(cfg *AppConfig, name, mode, token string) (*MediaConfig, err
 
 func (flow APIWorkflow) validate(mode config.ModelType) error {
 	switch flow.Operation {
-	case operationGenerate:
+	case operationGenerate, operationReference:
+		if flow.Operation == operationReference && mode != config.ModelVideo {
+			return errors.New("the reference workflow requires a video model")
+		}
 		if !slices.Contains(flow.AspectRatios, flow.DefaultAspect) || flow.DefaultAspect == "" {
-			return errors.New("the generate workflow requires a supported default aspect ratio")
+			return errors.New("the workflow requires a supported default aspect ratio")
 		}
 	case operationEdit:
 		if mode != config.ModelImage {
@@ -108,6 +113,11 @@ func (flow APIWorkflow) validate(mode config.ModelType) error {
 		}
 	default:
 		return fmt.Errorf("unsupported Studio workflow operation %q", flow.Operation)
+	}
+	if flow.MaxImages < 0 || flow.MaxImages > 10 ||
+		(flow.Operation == operationFirstFrame && flow.MaxImages > 2) ||
+		(flow.Operation == operationGenerate && flow.MaxImages != 0) {
+		return errors.New("invalid maxImages for the Studio workflow")
 	}
 	if !groupIDRe.MatchString(flow.ID) || flow.Resolution == "" {
 		return errors.New("apiWorkflows entry requires a valid ID and resolution")
@@ -133,8 +143,12 @@ func (c *Console) registerMedia(mux *http.ServeMux) {
 		fields = append(fields, "n", "output.size")
 	}
 	workflows := make(map[string]string, len(media.workflows))
+	maxImages := 0
 	for operation, flow := range media.workflows {
 		workflows[operation] = flow.ID
+		if operation != operationGenerate {
+			maxImages = max(maxImages, flow.imageLimit())
+		}
 	}
 	if len(workflows) > 1 {
 		fields = append(fields, "inputs.images")
@@ -142,15 +156,19 @@ func (c *Console) registerMedia(mux *http.ServeMux) {
 	if _, exists := workflows[operationEdit]; exists {
 		fields = append(fields, "inputs.mask")
 	}
+	if _, exists := workflows[operationReference]; exists {
+		fields = append(fields, "inputs.video", "inputs.audio")
+	}
 	mux.HandleFunc("GET /api/model-spec", func(w http.ResponseWriter, _ *http.Request) {
+		creative := map[string]any{"media": string(media.mode), "operations": media.operations, "canonical_fields": fields}
+		if maxImages > 0 {
+			creative["inputs"] = map[string]any{"reference_images": map[string]int{"max": maxImages}}
+		}
 		writeJSON(w, http.StatusOK, config.ModelSpec{
 			Name: media.name,
 			Mode: string(media.mode) + "_generation",
 			Extensions: map[string]any{
-				"creative": map[string]any{
-					"media": string(media.mode), "operations": media.operations,
-					"canonical_fields": fields,
-				},
+				"creative": creative,
 				"model_console_media": map[string]any{
 					"protocol": mediaContract, "workflow_id": workflows[operationGenerate], "workflows": workflows,
 				},
@@ -224,7 +242,21 @@ func (c *Console) createGeneration(w http.ResponseWriter, r *http.Request, user 
 	var in generationRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, studioMediaBodyLimit))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&in); err != nil || decoder.Decode(new(any)) != io.EOF {
+	err := decoder.Decode(&in)
+	if err == nil {
+		if trailingErr := decoder.Decode(new(any)); trailingErr != io.EOF {
+			err = trailingErr
+			if err == nil {
+				err = errors.New("multiple JSON values")
+			}
+		}
+	}
+	if err != nil {
+		var oversized *http.MaxBytesError
+		if errors.As(err, &oversized) {
+			mediaError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "Generation request exceeds 28 MiB")
+			return
+		}
 		mediaError(w, http.StatusBadRequest, "invalid_request", "Invalid generation request")
 		return
 	}
@@ -249,7 +281,7 @@ func (c *Console) createGeneration(w http.ResponseWriter, r *http.Request, user 
 		mediaError(w, http.StatusServiceUnavailable, "model_not_ready", "Model weights or Studio are still starting")
 		return
 	}
-	inputs, err := prepareGenerationInputs(in.Inputs, flow.Operation)
+	inputs, err := prepareGenerationInputs(in.Inputs, flow)
 	if err != nil {
 		mediaError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
