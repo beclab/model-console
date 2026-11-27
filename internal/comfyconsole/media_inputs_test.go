@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,9 +61,9 @@ func TestStudioUploadsGenerationInputs(t *testing.T) {
 						return
 					}
 					defer file.Close()
-					data := make([]byte, 8)
-					if _, err := file.Read(data); err != nil || base64.StdEncoding.EncodeToString(data) != "iVBORw0KGgo=" {
-						t.Errorf("bad uploaded bytes: %x, %v", data, err)
+					data, err := io.ReadAll(file)
+					if err != nil || base64.StdEncoding.EncodeToString(data) != png {
+						t.Errorf("uploaded file differs from the input PNG: length=%d, err=%v", len(data), err)
 					}
 					writeJSON(w, http.StatusOK, map[string]string{"kind": string(config.ModelImage), "id": strings.TrimSuffix(header.Filename, ".png")})
 				case "/studio/api/jobs":

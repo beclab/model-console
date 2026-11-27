@@ -167,7 +167,7 @@ func (c *Console) uploadGenerationInputs(w http.ResponseWriter, r *http.Request,
 		writer := multipart.NewWriter(&upload)
 		part, err := writer.CreateFormFile("file", input.role+input.extension)
 		if err == nil {
-			_, err = part.Write(input.data)
+			_, err = io.Copy(part, bytes.NewReader(input.data))
 		}
 		if err == nil {
 			err = writer.Close()
