@@ -170,7 +170,7 @@ func (v *mediaIdentity) refresh(ctx context.Context) error {
 		Issuer string `json:"issuer"`
 	}
 	if v.issuer == "" {
-		if err := v.getJSON(ctx, issuerDiscoveryPath, bearer, &metadata); err != nil {
+		if err := v.getJSON(ctx, issuerDiscoveryPath, "application/json", bearer, &metadata); err != nil {
 			return err
 		}
 		if !strings.HasPrefix(metadata.Issuer, "https://") {
@@ -183,7 +183,7 @@ func (v *mediaIdentity) refresh(ctx context.Context) error {
 	}
 	// The signer is configured by the cluster. Keep both reads on the trusted
 	// API Service and never follow a token-supplied URL or metadata redirect.
-	if err := v.getJSON(ctx, issuerKeysPath, bearer, &jwks); err != nil {
+	if err := v.getJSON(ctx, issuerKeysPath, "application/jwk-set+json", bearer, &jwks); err != nil {
 		return err
 	}
 	keys := make(map[string]*rsa.PublicKey, len(jwks.Keys))
@@ -234,13 +234,13 @@ func (jwk mediaJWK) publicKey() *rsa.PublicKey {
 	return &rsa.PublicKey{N: modulus, E: int(exponent)}
 }
 
-func (v *mediaIdentity) getJSON(ctx context.Context, path, token string, value any) error {
+func (v *mediaIdentity) getJSON(ctx context.Context, path, accept, token string, value any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.origin+path, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	res, err := v.client.Do(req)
 	if err != nil {
 		return err

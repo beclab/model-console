@@ -27,10 +27,22 @@ func TestMediaIdentity(t *testing.T) {
 	var kid atomic.Value
 	kid.Store("first")
 	var requests atomic.Int32
+	contentTypes := map[string]string{
+		issuerDiscoveryPath: "application/json",
+		issuerKeysPath:      "application/jwk-set+json",
+	}
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer model-service-account" {
 			http.Error(w, "missing discovery credential", http.StatusUnauthorized)
 			return
+		}
+		// Kubernetes negotiates the two endpoint media types separately.
+		if contentType := contentTypes[r.URL.Path]; contentType != "" {
+			if r.Header.Get("Accept") != contentType {
+				http.Error(w, "unsupported Accept media type", http.StatusNotAcceptable)
+				return
+			}
+			w.Header().Set("Content-Type", contentType)
 		}
 		requests.Add(1)
 		switch r.URL.Path {
