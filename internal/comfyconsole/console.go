@@ -38,6 +38,7 @@ const (
 // restart does not re-hash tens of GB. A marker only counts while the
 // model's size and mtime still match what was hashed.
 const markerDir = ".llm-init-verified"
+const studioRequestTimeout = 30 * time.Second
 
 // Options wires a Console. Zero intervals take the defaults below.
 type Options struct {
@@ -102,7 +103,7 @@ func New(opts Options) *Console {
 	}
 	if opts.StudioClient == nil {
 		opts.StudioClient = &http.Client{
-			Timeout:       30 * time.Second,
+			Timeout:       studioRequestTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		}
 	}

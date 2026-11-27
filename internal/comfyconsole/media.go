@@ -2,6 +2,7 @@ package comfyconsole
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/llm-init/llm-init/internal/config"
 	"github.com/llm-init/llm-init/internal/progress"
@@ -36,14 +38,15 @@ var (
 
 // APIWorkflow describes the text-driven workflow exposed by this app.
 type APIWorkflow struct {
-	MaxImages     int            `json:"maxImages,omitempty"`
-	ID            string         `json:"id"`
-	Operation     string         `json:"operation,omitempty"`
-	AspectRatios  []string       `json:"aspectRatios"`
-	DefaultAspect string         `json:"defaultAspect"`
-	Resolution    string         `json:"resolution"`
-	Resolutions   []string       `json:"resolutions,omitempty"`
-	Duration      *videoDuration `json:"durationSeconds,omitempty"`
+	MaxImages        int              `json:"maxImages,omitempty"`
+	ID               string           `json:"id"`
+	Operation        string           `json:"operation,omitempty"`
+	AspectRatios     []string         `json:"aspectRatios"`
+	DefaultAspect    string           `json:"defaultAspect"`
+	Resolution       string           `json:"resolution"`
+	Resolutions      []string         `json:"resolutions,omitempty"`
+	ResolutionPixels map[string]int64 `json:"resolutionPixels,omitempty"`
+	Duration         *videoDuration   `json:"durationSeconds,omitempty"`
 }
 
 type videoDuration struct {
@@ -260,6 +263,7 @@ type generationRequest struct {
 	Params     struct {
 		AspectRatio string  `json:"aspectRatio"`
 		Resolution  string  `json:"resolution"`
+		PixelCount  *int64  `json:"pixelCount"`
 		Seed        *uint64 `json:"seed"`
 		Duration    *int    `json:"durationSeconds"`
 	} `json:"params"`
@@ -364,6 +368,24 @@ func (flow APIWorkflow) generationParams(in generationRequest, mode config.Model
 		aspect = flow.DefaultAspect
 	}
 	resolution := in.Params.Resolution
+	if pixels := in.Params.PixelCount; pixels != nil {
+		if mode != config.ModelImage || flow.Operation != operationGenerate || resolution != "" || *pixels <= 0 {
+			return nil, errors.New("pixel size requires image generation without a resolution tier")
+		}
+		resolutions := flow.Resolutions
+		if len(resolutions) == 0 {
+			resolutions = []string{flow.Resolution}
+		}
+		for _, tier := range resolutions {
+			if flow.ResolutionPixels[tier] == *pixels {
+				resolution = tier
+				break
+			}
+		}
+		if resolution == "" {
+			return nil, errors.New("the requested pixel size does not match a resolution tier; use aspect ratio and resolution")
+		}
+	}
 	if resolution == "" {
 		resolution = flow.Resolution
 	}
@@ -412,7 +434,17 @@ func (c *Console) getGenerationContent(w http.ResponseWriter, r *http.Request, u
 		mediaError(w, http.StatusNotFound, "not_found", "No matching generation output")
 		return
 	}
-	resp := c.studioCall(w, r, user, http.MethodGet, "/media/"+id, nil)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	client := *c.opts.StudioClient
+	idleTimeout := client.Timeout
+	if idleTimeout <= 0 {
+		idleTimeout = studioRequestTimeout
+	}
+	client.Timeout = 0
+	timer := time.AfterFunc(idleTimeout, cancel)
+	defer timer.Stop()
+	resp := c.doStudioRequest(&client, w, r.WithContext(ctx), user, http.MethodGet, "/media/"+id, "application/json", nil)
 	if resp == nil {
 		return
 	}
@@ -424,7 +456,24 @@ func (c *Console) getGenerationContent(w http.ResponseWriter, r *http.Request, u
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, studioMediaReader{resp.Body, timer, idleTimeout}); err != nil && r.Context().Err() == nil {
+		// Make an interrupted response a transport error even if its size was unknown.
+		panic(http.ErrAbortHandler)
+	}
+}
+
+type studioMediaReader struct {
+	body    io.Reader
+	timer   *time.Timer
+	timeout time.Duration
+}
+
+func (r studioMediaReader) Read(p []byte) (int, error) {
+	n, err := r.body.Read(p)
+	if n > 0 {
+		r.timer.Reset(r.timeout)
+	}
+	return n, err
 }
 
 func (c *Console) readGeneration(w http.ResponseWriter, r *http.Request, user string) (generation, bool) {
@@ -494,6 +543,10 @@ func (c *Console) studioCall(w http.ResponseWriter, r *http.Request, user, metho
 }
 
 func (c *Console) studioRequest(w http.ResponseWriter, r *http.Request, user, method, path, contentType string, body io.Reader) *http.Response {
+	return c.doStudioRequest(c.opts.StudioClient, w, r, user, method, path, contentType, body)
+}
+
+func (c *Console) doStudioRequest(client *http.Client, w http.ResponseWriter, r *http.Request, user, method, path, contentType string, body io.Reader) *http.Response {
 	req, err := http.NewRequestWithContext(r.Context(), method, c.opts.ComfyURL+"/studio/api"+path, body)
 	if err != nil {
 		mediaError(w, http.StatusBadGateway, "studio_unavailable", "Could not prepare Studio request")
@@ -501,7 +554,10 @@ func (c *Console) studioRequest(w http.ResponseWriter, r *http.Request, user, me
 	}
 	req.Header.Set("X-Bfl-User", user)
 	req.Header.Set("Content-Type", contentType)
-	resp, err := c.opts.StudioClient.Do(req)
+	if body == nil && method == http.MethodGet {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		mediaError(w, http.StatusBadGateway, "studio_unavailable", "Could not reach Studio")
 		return nil

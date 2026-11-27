@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/llm-init/llm-init/internal/config"
 )
 
 func TestStudioMediaGeneration(t *testing.T) {
@@ -123,6 +126,77 @@ func TestStudioMediaGeneration(t *testing.T) {
 	image := request("GET", content+"image-1", "alice", token, "", 200, "image bytes")
 	if image.Header().Get("Content-Type") != "image/png" || creates.Load() != 1 {
 		t.Fatalf("content type = %q, Studio creates = %d", image.Header().Get("Content-Type"), creates.Load())
+	}
+}
+
+func TestStudioPixelSizesSelectAResolutionTier(t *testing.T) {
+	flow := APIWorkflow{
+		Operation: operationGenerate, DefaultAspect: "1:1", AspectRatios: []string{"1:1"},
+		Resolution: "1K", Resolutions: []string{"1K", "2K"},
+		ResolutionPixels: map[string]int64{"1K": 1024 * 1024, "2K": 2048 * 2048},
+	}
+	var request generationRequest
+	for _, tc := range []struct {
+		pixels int64
+		tier   string
+	}{{1024 * 1024, "1K"}, {2048 * 2048, "2K"}, {1536 * 1536, ""}} {
+		request.Params.PixelCount = &tc.pixels
+		params, err := flow.generationParams(request, config.ModelImage)
+		if tc.tier == "" {
+			if err == nil {
+				t.Fatal("unsupported size was accepted")
+			}
+			continue
+		}
+		if err != nil || params["resolution"] != tc.tier {
+			t.Fatalf("pixels %d: got %v, %v; want resolution %s", tc.pixels, params, err, tc.tier)
+		}
+	}
+}
+
+func TestStudioDownloadWaitsForProgressAndRejectsTruncation(t *testing.T) {
+	studio := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/studio/api/jobs/job":
+			_, _ = io.WriteString(w, `{"id":"job","status":"done","outputs":["slow","short"]}`)
+		case "/studio/api/media/slow":
+			w.Header().Set("Content-Length", "4")
+			for i := 0; i < 4; i++ {
+				time.Sleep(80 * time.Millisecond)
+				_, _ = io.WriteString(w, "x")
+				w.(http.Flusher).Flush()
+			}
+		case "/studio/api/media/short":
+			w.Header().Set("Content-Length", "4")
+			_, _ = io.WriteString(w, "x")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer studio.Close()
+	console := New(Options{Config: &AppConfig{}, ComfyURL: studio.URL, StudioClient: &http.Client{Timeout: 250 * time.Millisecond}})
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("id", "job")
+		console.getGenerationContent(w, r, "alice")
+	}))
+	defer proxy.Close()
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(proxy.URL + "?outputId=slow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || string(body) != "xxxx" {
+		t.Fatalf("slow download: status %d, body %q, error %v", resp.StatusCode, body, err)
+	}
+	resp, err = client.Get(proxy.URL + "?outputId=short")
+	if err == nil {
+		_, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("download reported success for incomplete content")
 	}
 }
 
