@@ -28,7 +28,9 @@ const comfyDefaultPort = "8090"
 //	COMFY_MODELS_DIR  ComfyUI models root (required)
 //	COMFYUI_URL       ComfyUI base URL (default http://127.0.0.1:8188)
 //	MODEL_NAME / MODEL_MODE  identity of the published model (image for t2i)
-//	COMFY_API_TOKEN   secret shared with Router for generation calls
+//	COMFY_MEDIA_AUTH  generation API authentication (shared-token or kubernetes-jwks)
+//	COMFY_MEDIA_APP   Olares application name for the media token audience
+//	COMFY_API_TOKEN   secret shared with Router in shared-token mode
 //	PORT              listen port (default 8090)
 //	HF_TOKEN          optional bearer token for huggingface.co downloads
 //	HF_ENDPOINT       optional Hugging Face mirror; huggingface.co model URLs are fetched from it
@@ -90,7 +92,9 @@ func runComfyUI(getenv config.Getenv, stderr, configOutput *os.File, publishMode
 			fmt.Fprintln(stderr, "config error: ENGINE_ARGS must be empty for ComfyUI")
 			return exitConfig
 		}
-		media, err = comfyconsole.NewMediaConfig(cfg, env("MODEL_NAME", ""), env("MODEL_MODE", ""), env("COMFY_API_TOKEN", ""))
+		media, err = comfyconsole.NewMediaConfigWithAuth(cfg, env("MODEL_NAME", ""), env("MODEL_MODE", ""), comfyconsole.MediaAuthorization{
+			Mode: env("COMFY_MEDIA_AUTH", ""), SharedToken: env("COMFY_API_TOKEN", ""), AppName: env("COMFY_MEDIA_APP", ""),
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "config error: %v\n", err)
 			return exitConfig

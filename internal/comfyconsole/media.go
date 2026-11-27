@@ -28,6 +28,7 @@ const (
 )
 
 var (
+	mediaAppPattern   = regexp.MustCompile(`^[a-z][a-z0-9]{0,29}$`)
 	modelNamePattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	studioUserPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	studioIDPattern   = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
@@ -56,12 +57,26 @@ type MediaConfig struct {
 	name       string
 	mode       config.ModelType
 	token      string
+	authMode   string
+	identity   *mediaIdentity
 	workflows  map[string]APIWorkflow
 	operations []string
 }
 
 // NewMediaConfig validates the settings used to publish a model to Router.
 func NewMediaConfig(cfg *AppConfig, name, mode, token string) (*MediaConfig, error) {
+	return NewMediaConfigWithAuth(cfg, name, mode, MediaAuthorization{SharedToken: token})
+}
+
+// MediaAuthorization configures authentication on the Router-facing media API.
+type MediaAuthorization struct {
+	Mode        string
+	SharedToken string
+	AppName     string
+}
+
+// NewMediaConfigWithAuth selects the credential used by the protected media API.
+func NewMediaConfigWithAuth(cfg *AppConfig, name, mode string, auth MediaAuthorization) (*MediaConfig, error) {
 	if !modelNamePattern.MatchString(name) {
 		return nil, errors.New("MODEL_NAME must be a stable model identifier")
 	}
@@ -69,10 +84,23 @@ func NewMediaConfig(cfg *AppConfig, name, mode, token string) (*MediaConfig, err
 	if mediaMode != config.ModelImage && mediaMode != config.ModelVideo {
 		return nil, errors.New("MODEL_MODE must be image or video for the Studio API")
 	}
-	if len(token) < 32 {
-		return nil, errors.New("COMFY_API_TOKEN must be at least 32 characters")
+	media := &MediaConfig{name: name, mode: mediaMode, workflows: make(map[string]APIWorkflow)}
+	switch auth.Mode {
+	case "", mediaAuthSharedToken:
+		if len(auth.SharedToken) < 32 {
+			return nil, errors.New("COMFY_API_TOKEN must be at least 32 characters")
+		}
+		media.authMode = mediaAuthSharedToken
+		media.token = auth.SharedToken
+	case mediaAuthKubernetes:
+		if !mediaAppPattern.MatchString(auth.AppName) {
+			return nil, errors.New("COMFY_MEDIA_APP must be the Olares application name")
+		}
+		media.authMode = mediaAuthKubernetes
+		media.identity = newMediaIdentity(auth.AppName)
+	default:
+		return nil, errors.New("COMFY_MEDIA_AUTH must be shared-token or kubernetes-jwks")
 	}
-	media := &MediaConfig{name: name, mode: mediaMode, token: token, workflows: make(map[string]APIWorkflow)}
 	seenIDs := make(map[string]bool)
 	for _, flow := range cfg.APIWorkflows {
 		if flow.Operation == "" {
@@ -171,6 +199,7 @@ func (c *Console) registerMedia(mux *http.ServeMux) {
 				"creative": creative,
 				"model_console_media": map[string]any{
 					"protocol": mediaContract, "workflow_id": workflows[operationGenerate], "workflows": workflows,
+					"auth": media.authMode,
 				},
 			},
 		})
@@ -201,11 +230,26 @@ func (c *Console) mediaProgress(w http.ResponseWriter, _ *http.Request) {
 func (c *Console) requireMediaUser(handler func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := r.Header.Get("X-Model-Console-User")
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Model-Console-Token")), []byte(c.opts.Media.token)) != 1 || !studioUserPattern.MatchString(user) {
-			mediaError(w, http.StatusUnauthorized, "unauthorized", "A Router credential and a valid user are required")
-			return
+		if studioUserPattern.MatchString(user) {
+			media := c.opts.Media
+			token := r.Header.Get("X-Model-Console-Token")
+			authorized := false
+			if media.identity != nil {
+				var err error
+				authorized, err = media.identity.verify(r.Context(), token)
+				if err != nil {
+					mediaError(w, http.StatusServiceUnavailable, "media_auth_unavailable", "Router identity verification is unavailable")
+					return
+				}
+			} else {
+				authorized = subtle.ConstantTimeCompare([]byte(token), []byte(media.token)) == 1
+			}
+			if authorized {
+				handler(w, r, user)
+				return
+			}
 		}
-		handler(w, r, user)
+		mediaError(w, http.StatusUnauthorized, "unauthorized", "A Router credential and a valid user are required")
 	}
 }
 
