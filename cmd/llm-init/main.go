@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,8 +72,9 @@ func run(args []string, stdout, stderr *os.File, getenv config.Getenv) int {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	if len(args) > 0 && args[0] == "comfyui" {
-		return runComfyUI(getenv, stderr)
+	downloadOnly := len(args) > 0 && args[0] == string(config.EngineComfyUI)
+	if downloadOnly {
+		args = args[1:]
 	}
 
 	fs := flag.NewFlagSet("llm-init", flag.ContinueOnError)
@@ -99,11 +101,21 @@ func run(args []string, stdout, stderr *os.File, getenv config.Getenv) int {
 		return exitOK
 	}
 
-	// --healthcheck runs before config.Load so a partially-configured
-	// container (or one whose env is intentionally minimal) can still
-	// be probed. Reads PORT directly with the same default config uses.
+	comfy := downloadOnly || strings.TrimSpace(getenv("ENGINE_KIND")) == string(config.EngineComfyUI)
+	// Probe the same port as the server, even before its config is ready.
 	if healthcheck {
-		return doHealthcheck(getenv, stdout, stderr)
+		port := strings.TrimSpace(getenv("PORT"))
+		if port == "" && comfy {
+			port = comfyDefaultPort
+		}
+		return doHealthcheck(port, stdout, stderr)
+	}
+	if comfy {
+		var configOutput *os.File
+		if showConfig {
+			configOutput = stdout
+		}
+		return runComfyUI(getenv, stderr, configOutput, !downloadOnly)
 	}
 
 	cfg, err := config.Load(getenv)
@@ -552,10 +564,8 @@ func buildHTTPServer(addr string, handler http.Handler) *http.Server {
 // healthcheck so that distroless images (which have no shell) can still be
 // probed. Returns exitOK on a 2xx, exitHealthcheckFail otherwise.
 //
-// PORT is read from the injected getenv with the same default (8080) as
-// config.Load, so the probe and the server agree without sharing config.
-func doHealthcheck(getenv config.Getenv, stdout, stderr *os.File) int {
-	port := getenv("PORT")
+// An empty port selects the default LLM listener.
+func doHealthcheck(port string, stdout, stderr *os.File) int {
 	if port == "" {
 		port = "8080"
 	}

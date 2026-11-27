@@ -4,9 +4,8 @@
 // It reads one app config shared with the Easy UI, downloads the models the
 // workflow needs into ComfyUI's model tree (resumable, sha256-verified),
 // probes ComfyUI's GET /system_stats, and reports both through
-// GET /api/status. The app is ready only when every model is verified and
-// ComfyUI answers. Nothing here touches the LLM lifecycle: the mode is
-// entered through `llm-init comfyui` and shares only internal/fetch.
+// GET /api/status. Studio apps can also publish a model card and a generation
+// API. The ComfyUI and LLM lifecycles are separate.
 package comfyconsole
 
 import (
@@ -20,11 +19,11 @@ import (
 	"strings"
 )
 
-// AppConfig is the single source of truth for the app: the workflow the
-// Easy UI submits and the models it needs. The console reads only Models
-// and Groups; Workflow is kept raw so the Easy UI owns its schema.
+// AppConfig describes the app's workflows and the models they need.
+// Workflow stays raw because the Easy UI owns its schema.
 type AppConfig struct {
-	Workflow json.RawMessage `json:"workflow"`
+	Workflow     json.RawMessage `json:"workflow"`
+	APIWorkflows []APIWorkflow   `json:"apiWorkflows,omitempty"`
 	// Models are always installed.
 	Models []Model `json:"models"`
 	// Groups are optional model sets on top of Models, e.g. one per

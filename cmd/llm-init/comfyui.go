@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,13 +20,17 @@ import (
 	"github.com/llm-init/llm-init/internal/version"
 )
 
-// runComfyUI is `llm-init comfyui`: the Model Console of a single-workflow
-// ComfyUI app (see internal/comfyconsole). It reads its own small env set
-// and never loads the LLM config.
+const comfyDefaultPort = "8090"
+
+// runComfyUI starts the weight manager and optionally publishes its Studio workflow.
 //
 //	COMFY_APP_CONFIG  app config JSON (default /etc/comfy-app/app-config.json)
 //	COMFY_MODELS_DIR  ComfyUI models root (required)
 //	COMFYUI_URL       ComfyUI base URL (default http://127.0.0.1:8188)
+//	MODEL_NAME / MODEL_MODE  identity of the published model (image for t2i)
+//	COMFY_MEDIA_AUTH  generation API authentication (shared-token or kubernetes-jwks)
+//	COMFY_MEDIA_APP   Olares application name for the media token audience
+//	COMFY_API_TOKEN   secret shared with Router in shared-token mode
 //	PORT              listen port (default 8090)
 //	HF_TOKEN          optional bearer token for huggingface.co downloads
 //	HF_ENDPOINT       optional Hugging Face mirror; huggingface.co model URLs are fetched from it
@@ -33,7 +38,7 @@ import (
 //	COMFY_GROUPS      model groups to install first: ids separated by commas, "all", or empty for the first
 //	COMFY_SELECTION_FILE  where the installed groups are kept across restarts (on persistent storage)
 //	LOG_LEVEL / LOG_FORMAT  as in the LLM mode
-func runComfyUI(getenv config.Getenv, stderr *os.File) int {
+func runComfyUI(getenv config.Getenv, stderr, configOutput *os.File, publishModel bool) int {
 	env := func(k, def string) string {
 		if v := strings.TrimSpace(getenv(k)); v != "" {
 			return v
@@ -81,8 +86,39 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 		return exitConfig
 	}
 
+	var media *comfyconsole.MediaConfig
+	if publishModel {
+		if env("ENGINE_ARGS", "") != "" {
+			fmt.Fprintln(stderr, "config error: ENGINE_ARGS must be empty for ComfyUI")
+			return exitConfig
+		}
+		media, err = comfyconsole.NewMediaConfigWithAuth(cfg, env("MODEL_NAME", ""), env("MODEL_MODE", ""), comfyconsole.MediaAuthorization{
+			Mode: env("COMFY_MEDIA_AUTH", ""), SharedToken: env("COMFY_API_TOKEN", ""), AppName: env("COMFY_MEDIA_APP", ""),
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "config error: %v\n", err)
+			return exitConfig
+		}
+	}
+	if configOutput != nil {
+		summary := map[string]any{
+			"engine_kind": config.EngineComfyUI, "port": env("PORT", comfyDefaultPort),
+			"model_count": len(cfg.Models), "selected_groups": selected,
+		}
+		if publishModel {
+			summary["model_name"] = env("MODEL_NAME", "")
+			summary["model_mode"] = env("MODEL_MODE", "")
+		}
+		if err := json.NewEncoder(configOutput).Encode(summary); err != nil {
+			fmt.Fprintf(stderr, "print config: %v\n", err)
+			return exitConfig
+		}
+		return exitOK
+	}
+
 	console := comfyconsole.New(comfyconsole.Options{
 		Config:        cfg,
+		Media:         media,
 		ModelsDir:     modelsDir,
 		ComfyURL:      strings.TrimRight(env("COMFYUI_URL", "http://127.0.0.1:8188"), "/"),
 		Headers:       headers,
@@ -95,7 +131,7 @@ func runComfyUI(getenv config.Getenv, stderr *os.File) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	addr := net.JoinHostPort("", env("PORT", "8090"))
+	addr := net.JoinHostPort("", env("PORT", comfyDefaultPort))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		fmt.Fprintf(stderr, "listen %s: %v\n", addr, err)

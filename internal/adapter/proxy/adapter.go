@@ -136,15 +136,17 @@ func writeEngineNotListening(w http.ResponseWriter, err error) {
 func (a *Adapter) director(req *http.Request) {
 	req.URL.Scheme = a.target.Scheme
 	req.URL.Host = a.target.Host
-	// Preserve the full inbound path/query as the upstream path. Don't
-	// prepend a.target.Path because the engines mount /v1 at root and
-	// dataplane.Mount routes /v1 in.
+	stripAuthorization(req.Header)
+	rewriteModelInBody(req, a.cfg.Model.Name, a.kind)
+	// OpenWebUI uses a local alias. The engine serves the OpenAI path.
+	if req.URL.Path == pathAPIChatCompletions {
+		req.URL.Path = pathChatCompletions
+		req.URL.RawPath = ""
+	}
 	if a.target.Path != "" && a.target.Path != "/" {
 		req.URL.Path = strings.TrimSuffix(a.target.Path, "/") + req.URL.Path
 	}
 	req.Host = a.target.Host
-	stripAuthorization(req.Header)
-	rewriteModelInBody(req, a.cfg.Model.Name, a.kind)
 }
 
 // Kind returns the configured engine kind (vllm / llamacpp / sglang).

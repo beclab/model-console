@@ -75,6 +75,56 @@ func TestRun_VersionFlag(t *testing.T) {
 	}
 }
 
+func TestRun_ComfyUIEntrypoints(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app-config.json")
+	const flow = `{"id":"t2i","defaultAspect":"1:1","aspectRatios":["1:1"],"resolution":"2K"}`
+	token := strings.Repeat("s", 32)
+	for _, tc := range []struct {
+		name     string
+		download bool
+		model    string
+		mode     string
+		token    string
+		flows    string
+		want     int
+	}{
+		{"publish", false, "h3-image", "image", token, flow, exitOK},
+		{"missing name", false, "", "image", token, flow, exitConfig},
+		{"wrong mode", false, "h3-image", "chat", token, flow, exitConfig},
+		{"missing token", false, "h3-image", "image", "", flow, exitConfig},
+		{"missing workflow", false, "h3-image", "image", token, "", exitConfig},
+		{"two workflows", false, "h3-image", "image", token, flow + "," + flow, exitConfig},
+		{"download only", true, "", "", "", "", exitOK},
+		{"subcommand stays download only", true, "h3-image", "image", "", flow, exitOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := fmt.Sprintf(`{"models":[{"name":"model","dir":"weights","url":"http://localhost/model","size":1,"sha256":"%s"}],"apiWorkflows":[%s]}`, strings.Repeat("0", 64), tc.flows)
+			if err := os.WriteFile(file, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := mapEnv(map[string]string{
+				"ENGINE_KIND": "comfyui", "MODEL_NAME": tc.model, "MODEL_MODE": tc.mode,
+				"COMFY_API_TOKEN": tc.token, "COMFY_MODELS_DIR": dir, "COMFY_APP_CONFIG": file,
+			})
+			args := []string{"--print-config"}
+			if tc.download {
+				args = []string{"comfyui", "--print-config"}
+			}
+			var code int
+			stdout, stderr := captureOutput(t, func(out, errF *os.File) {
+				code = run(args, out, errF, env)
+			})
+			if code != tc.want || strings.Contains(stdout+stderr, token) {
+				t.Fatalf("exit code = %d, want %d, or credential exposed", code, tc.want)
+			}
+			if code == exitOK && strings.Contains(stdout, `"model_name"`) == tc.download {
+				t.Errorf("unexpected config for this entrypoint: %s", stdout)
+			}
+		})
+	}
+}
+
 func TestRun_HelpFlag(t *testing.T) {
 	t.Parallel()
 	var code int

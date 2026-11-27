@@ -38,15 +38,18 @@ const (
 // restart does not re-hash tens of GB. A marker only counts while the
 // model's size and mtime still match what was hashed.
 const markerDir = ".llm-init-verified"
+const studioRequestTimeout = 30 * time.Second
 
 // Options wires a Console. Zero intervals take the defaults below.
 type Options struct {
-	Config     *AppConfig
-	ModelsDir  string
-	ComfyURL   string // e.g. http://127.0.0.1:8188
-	Headers    http.Header
-	Downloader fetch.RangeDownloader
-	Client     *http.Client // for the /system_stats probe
+	Config       *AppConfig
+	Media        *MediaConfig
+	ModelsDir    string
+	ComfyURL     string // e.g. http://127.0.0.1:8188
+	Headers      http.Header
+	Downloader   fetch.RangeDownloader
+	Client       *http.Client // for the /system_stats probe
+	StudioClient *http.Client
 
 	// Selected are the groups to keep (LoadSelection); SelectionFile is
 	// rewritten when they change.
@@ -97,6 +100,12 @@ func New(opts Options) *Console {
 	}
 	if opts.Client == nil {
 		opts.Client = &http.Client{Timeout: 3 * time.Second}
+	}
+	if opts.StudioClient == nil {
+		opts.StudioClient = &http.Client{
+			Timeout:       studioRequestTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	if opts.Connections <= 0 {
 		opts.Connections = 8
@@ -184,7 +193,14 @@ func (c *Console) probeLoop(ctx context.Context) {
 }
 
 func (c *Console) probe(ctx context.Context) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.opts.ComfyURL+"/system_stats", nil)
+	if !c.probePath(ctx, "/system_stats") {
+		return false
+	}
+	return c.opts.Media == nil || c.probePath(ctx, "/studio/api/health")
+}
+
+func (c *Console) probePath(ctx context.Context, path string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.opts.ComfyURL+path, nil)
 	if err != nil {
 		return false
 	}

@@ -426,8 +426,8 @@ func TestProxy_VisionBodyForwarded(t *testing.T) {
 			rec := httptest.NewRecorder()
 			a.OpenAIHandler(config.Config{}).ServeHTTP(rec, req)
 
-			if rec.Code == http.StatusRequestEntityTooLarge {
-				t.Fatalf("status=413, vision body should be forwarded under the 16 MiB cap")
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "data: [DONE]") {
+				t.Fatalf("chat stream on %s: status=%d body=%s", path, rec.Code, rec.Body.String())
 			}
 			if len(u.gotRequests) != 1 {
 				t.Fatalf("upstream requests = %d, want 1 (body was not forwarded)", len(u.gotRequests))
