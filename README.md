@@ -86,10 +86,20 @@ ComfyUI weights directory. In the JSON file selected by `COMFY_APP_CONFIG`, decl
 a text `apiWorkflows` entry with the Studio flow `id` (H3 uses `t2i`), its supported
 `aspectRatios`, a `defaultAspect` from that list, and its `resolution` (`2K`).
 For Qwen Image 2.1 use `MODEL_NAME=qwen-image-2.1`. For MiniMax H3 and FastH3
-use `MODEL_MODE=video`, `MODEL_NAME=minimax-h3` or `fast-h3`, and the `t2v` flow. Declare the supported `resolutions`, the default `resolution`,
-and `durationSeconds` with whole-second `default`, `min`, and `max` values.
-Supply a shared secret of at least 32 bytes as `COMFY_API_TOKEN` and as
-`LLM_GATEWAY_PROVIDER_STUDIO_MEDIA_TOKEN` in Router.
+use `MODEL_MODE=video`, `MODEL_NAME=minimax-h3` or `fast-h3`, and the `t2v`
+flow. Declare the supported `resolutions`, the default `resolution`, and
+`durationSeconds` with whole-second `default`, `min`, and `max` values.
+
+On Olares, the Studio charts set `COMFY_MEDIA_AUTH=kubernetes-jwks` and
+`COMFY_MEDIA_APP` to the target app's name. Router uses its `router-media`
+service account in `router-shared` and sends a projected token with audience
+`olares:model-console:media:<app-name>` and a 600-second lifetime. Model
+Console verifies it with the cluster's signing keys.
+
+For shared-token deployments, set `COMFY_MEDIA_AUTH=shared-token` (the
+default when omitted) and supply the same secret of at least 32 bytes as
+`COMFY_API_TOKEN` in Model Console and `LLM_GATEWAY_PROVIDER_STUDIO_MEDIA_TOKEN`
+in Router.
 
 Additional `apiWorkflows` entries declare an `operation` and the Studio flow
 `id`. The Chart sets `maxImages` from the selected workflow.
